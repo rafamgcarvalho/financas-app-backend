@@ -1,0 +1,58 @@
+GET http://localhost:3001
+
+### Criar usuário
+POST http://localhost:3001/users/register
+Content-Type: application/json
+
+{
+  "name": "Rafael",
+  "email": "rafa@email.com",
+  "password": "1234567"
+}
+
+### Login de Usuário
+POST http://localhost:3001/auth/login
+Content-Type: application/json
+
+{
+    "email": "rafa@email.com",
+    "password": "1234567"
+}
+
+### Variável de Ambiente para facilitar os testes
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4MjA5MmI3NC0xMjhhLTQ5MDktYmU1Ni00YWYwYmU3Mzk3NjAiLCJlbWFpbCI6InJhZmFAZW1haWwuY29tIiwibmFtZSI6IlJhZmFlbCIsImlhdCI6MTc2ODI1MDM0MiwiZXhwIjoxNzY4ODU1MTQyfQ.JWzCInzEUAHxKBZAYrZndfc6x1cekJeuToC83Ic-9zA
+
+### 1. Criar uma Receita (Salário)
+POST http://localhost:3001/transactions
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+    "title": "Salário Janeiro",
+    "amount": 5000,
+    "type": "INCOME",
+    "category": "Trabalho",
+    "date": "2026-01-12",
+    "description": "Meu salário mensal"
+}
+
+### 2. Criar uma Despesa (Mercado)
+POST http://localhost:3001/transactions
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+    "title": "Compras Supermercado",
+    "amount": 450.50,
+    "type": "EXPENSE",
+    "category": "Alimentação",
+    "date": "2026-01-11"
+}
+
+### 3. Listar todas as minhas transações
+GET http://localhost:3001/transactions
+Authorization: Bearer {{token}}
+
+### 4. Ver o Saldo Consolidado (Cálculo)
+GET http://localhost:3001/transactions/balance
+Authorization: Bearer {{token}}
