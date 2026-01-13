@@ -26,7 +26,6 @@ export class AuthGuard implements CanActivate {
         secret: process.env.JWT_SECRET,
       });
 
-      // Aqui a mágica acontece: injetamos o usuário na request
       request['user'] = payload;
     } catch {
       throw new UnauthorizedException('Token inválido ou expirado');

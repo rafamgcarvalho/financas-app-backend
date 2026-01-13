@@ -21,7 +21,7 @@ export class CreateTransactionDto {
   @IsOptional()
   description?: string;
 
-  @IsISO8601() // Garante formato de data válido (YYYY-MM-DD)
+  @IsISO8601()
   @IsNotEmpty()
   date: string;
 

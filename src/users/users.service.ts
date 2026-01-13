@@ -7,15 +7,16 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 import { db } from '../db/drizzle';
-import { users } from '../db/schema';
+import { transactions, users } from '../db/schema';
 import { CreateUserDto } from './dto/create-user.dto';
 import * as bcrypt from 'bcrypt';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
+import { CreateTransactionDto } from 'src/transactions/dto/create-transaction.dto';
 
 @Injectable()
 export class UsersService {
+  /*Criar um usuário*/
   async create(dto: CreateUserDto) {
-    // 1. Verificar se o e-mail já existe (Boa prática antes de tentar inserir)
     const existingUser = await db
       .select()
       .from(users)
@@ -44,7 +45,6 @@ export class UsersService {
 
       return user;
     } catch (error) {
-      // 2. Tratamento de erro específico do Postgres para Unique Constraint (erro 23505)
       if (error.code === '23505') {
         throw new ConflictException('E-mail já cadastrado');
       }
@@ -54,6 +54,32 @@ export class UsersService {
     }
   }
 
+  /*Editar um usuário*/
+  async update(id: string, userId: string, dto: Partial<CreateTransactionDto>) {
+    const [updated] = await db
+      .update(transactions)
+      .set({
+        ...dto,
+        amount: dto.amount?.toString(),
+        date: dto.date ? new Date(dto.date) : undefined,
+      })
+      .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
+      .returning();
+
+    return updated;
+  }
+
+  /*Excluir um usuário*/
+  async remove(id: string, userId: string) {
+    const [deleted] = await db
+      .delete(transactions)
+      .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
+      .returning();
+
+    return deleted;
+  }
+
+  /*Encontrar pelo email*/
   async findByEmail(email: string) {
     const [user] = await db
       .select()

@@ -18,21 +18,18 @@ export class AuthService {
       throw new UnauthorizedException('Email ou senha inválidos');
     }
 
-    // 2. Compara a senha
     const passwordValid = await bcrypt.compare(dto.password, user.password);
 
     if (!passwordValid) {
       throw new UnauthorizedException('Email ou senha inválidos');
     }
 
-    // 3. Gera o payload (dados que vão dentro do token)
     const payload = {
       sub: user.id,
       email: user.email,
       name: user.name,
     };
 
-    // 4. Retorna o token + dados básicos
     return {
       user: {
         id: user.id,
