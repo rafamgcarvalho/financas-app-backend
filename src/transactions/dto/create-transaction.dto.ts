@@ -6,6 +6,7 @@ import {
   IsString,
   IsOptional,
   IsISO8601,
+  IsBoolean,
 } from 'class-validator';
 
 export class CreateTransactionDto {
@@ -32,4 +33,8 @@ export class CreateTransactionDto {
   @IsEnum(['INCOME', 'EXPENSE'])
   @IsNotEmpty()
   type: 'INCOME' | 'EXPENSE';
+
+  @IsBoolean()
+  @IsOptional()
+  isRecurring?: boolean;
 }
