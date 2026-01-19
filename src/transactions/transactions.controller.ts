@@ -46,7 +46,15 @@ export class TransactionsController {
   }
 
   @Get('balance')
-  async getBalance(@Req() req: any) {
-    return this.transactionsService.getBalance(req.user.sub);
+  async getBalance(
+    @Req() req: any,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+  ) {
+    return this.transactionsService.getBalance(
+      req.user.sub,
+      month ? parseInt(month) : undefined,
+      year ? parseInt(year) : undefined,
+    );
   }
 }

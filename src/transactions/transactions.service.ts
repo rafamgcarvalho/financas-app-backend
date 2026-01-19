@@ -22,6 +22,34 @@ export class TransactionsService {
     return newTransaction;
   }
 
+  /*Encontrar transações de um usuário por id*/
+  async findAllById(userId: string, month?: number, year?: number) {
+    // 1. Define o padrão para o mês/ano atual se não forem fornecidos
+    const targetMonth = month || new Date().getMonth() + 1;
+    const targetYear = year || new Date().getFullYear();
+
+    // 2. Cria as datas de início e fim com precisão
+    const startDate = new Date(
+      Date.UTC(targetYear, targetMonth - 1, 1, 0, 0, 0),
+    );
+    const endDate = new Date(
+      Date.UTC(targetYear, targetMonth, 0, 23, 59, 59, 999),
+    );
+
+    // 3. A cláusula WHERE agora sempre filtrará por data, garantindo a lógica do Dashboard
+    const whereClause = and(
+      eq(transactions.userId, userId),
+      gte(transactions.date, startDate),
+      lte(transactions.date, endDate),
+    ) as SQL;
+
+    return await db
+      .select()
+      .from(transactions)
+      .where(whereClause)
+      .orderBy(sql`${transactions.date} DESC`);
+  }
+
   /*Editar uma transação*/
   async update(id: string, userId: string, dto: Partial<CreateTransactionDto>) {
     const [updated] = await db
@@ -47,28 +75,6 @@ export class TransactionsService {
     return deleted;
   }
 
-  /*Encontrar uma transação por id*/
-  async findAllById(userId: string, month?: number, year?: number) {
-    let whereClause: SQL = eq(transactions.userId, userId);
-
-    if (month && year) {
-      const startDate = new Date(year, month - 1, 1);
-      const endDate = new Date(year, month, 0);
-
-      whereClause = and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, startDate),
-        lte(transactions.date, endDate),
-      ) as SQL;
-    }
-
-    return await db
-      .select()
-      .from(transactions)
-      .where(whereClause)
-      .orderBy(sql`${transactions.date} DESC`);
-  }
-
   /*Calcular balanço*/
   async getBalance(userId: string, month?: number, year?: number) {
     const allTransactions = await this.findAllById(userId, month, year);
@@ -76,8 +82,12 @@ export class TransactionsService {
     const balance = allTransactions.reduce(
       (acc, transaction) => {
         const amount = Number(transaction.amount);
-        if (transaction.type === 'INCOME') acc.income += amount;
-        else acc.expense += amount;
+
+        if (transaction.type === 'INCOME') {
+          acc.income += amount;
+        } else {
+          acc.expense += amount;
+        }
 
         acc.total = acc.income - acc.expense;
         return acc;
