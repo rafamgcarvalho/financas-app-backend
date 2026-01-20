@@ -77,7 +77,7 @@ export class UsersService {
     return deleted;
   }
 
-  /*Encontrar pelo email*/
+  /*Encontrar pelo username*/
   async findByUsername(username: string) {
     const [user] = await db
       .select()
