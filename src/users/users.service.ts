@@ -1,6 +1,4 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import {
   Injectable,
   ConflictException,
@@ -20,11 +18,11 @@ export class UsersService {
     const existingUser = await db
       .select()
       .from(users)
-      .where(eq(users.email, dto.email))
+      .where(eq(users.username, dto.username))
       .limit(1);
 
     if (existingUser.length > 0) {
-      throw new ConflictException('Este e-mail já está em uso');
+      throw new ConflictException('Este nome de usuário já está em uso');
     }
 
     try {
@@ -34,19 +32,19 @@ export class UsersService {
         .insert(users)
         .values({
           name: dto.name,
-          email: dto.email,
+          username: dto.username,
           password: hashedPassword,
         })
         .returning({
           id: users.id,
           name: users.name,
-          email: users.email,
+          username: users.username,
         });
 
       return user;
     } catch (error) {
       if (error.code === '23505') {
-        throw new ConflictException('E-mail já cadastrado');
+        throw new ConflictException('Nome de usuário já cadastrado');
       }
 
       console.error('Erro ao criar usuário:', error);
@@ -80,11 +78,11 @@ export class UsersService {
   }
 
   /*Encontrar pelo email*/
-  async findByEmail(email: string) {
+  async findByUsername(username: string) {
     const [user] = await db
       .select()
       .from(users)
-      .where(eq(users.email, email))
+      .where(eq(users.username, username.toLowerCase()))
       .limit(1);
     return user;
   }
