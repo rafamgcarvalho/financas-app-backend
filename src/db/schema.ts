@@ -6,6 +6,8 @@ import {
   numeric,
   boolean,
   pgEnum,
+  integer,
+  text,
 } from 'drizzle-orm/pg-core';
 
 /**
@@ -48,5 +50,9 @@ export const transactions = pgTable('transactions', {
   type: transactionTypeEnum('type').notNull(),
 
   isRecurring: boolean('is_recurring').default(false),
+
+  installments: integer('installments').default(1),
+  groupId: text('group_id'),
+
   createdAt: timestamp('created_at').defaultNow(),
 });
