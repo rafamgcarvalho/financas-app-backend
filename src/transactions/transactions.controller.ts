@@ -80,4 +80,37 @@ export class TransactionsController {
 
     return this.transactionsService.getTransactionRange(userId, type);
   }
+
+  @Get('stats')
+  async getStats(@Req() req: any) {
+    return this.transactionsService.getStats(req.user.sub);
+  }
+
+  @Get('stats/comparison')
+  async getComparison(
+    @Request() req,
+    @Query('month') month: number,
+    @Query('year') year: number,
+  ) {
+    const userId = req.user?.id || req.user?.sub;
+    return this.transactionsService.getMonthlyComparison(
+      userId,
+      Number(month),
+      Number(year),
+    );
+  }
+
+  @Get('stats/categories')
+  async getCategoryStats(
+    @Request() req,
+    @Query('month') month: number,
+    @Query('year') year: number,
+  ) {
+    const userId = req.user?.id || req.user?.sub;
+    return this.transactionsService.getCategoryStats(
+      userId,
+      Number(month),
+      Number(year),
+    );
+  }
 }
