@@ -201,68 +201,13 @@ export class TransactionsService {
     };
   }
 
-  // /* Estatísticas para Gráficos */
-  // async getStats(userId: string) {
-  //   // 1. Busca todas as transações do usuário (sem filtro de data para ver o histórico todo)
-  //   const allTransactions = await db
-  //     .select()
-  //     .from(transactions)
-  //     .where(eq(transactions.userId, userId))
-  //     .orderBy(sql`${transactions.date} ASC`);
-
-  //   // 2. Agrupador (usando um Map para manter a ordem de inserção ou objeto para chaves)
-  //   const statsMap: Record<
-  //     string,
-  //     { label: string; income: number; expense: number; dateRef: Date }
-  //   > = {};
-
-  //   allTransactions.forEach((t) => {
-  //     const date = new Date(t.date);
-
-  //     // Criamos uma chave única por mês/ano (Ex: "01/2024")
-  //     // E um label amigável (Ex: "Jan/24")
-  //     const month = date.getUTCMonth();
-  //     const year = date.getUTCFullYear();
-  //     const key = `${year}-${month}`;
-  //     const label = date.toLocaleDateString('pt-BR', {
-  //       month: 'short',
-  //       year: '2-digit',
-  //     });
-
-  //     if (!statsMap[key]) {
-  //       statsMap[key] = {
-  //         label: label.replace('.', ''), // Remove ponto se houver (ex: abr.)
-  //         income: 0,
-  //         expense: 0,
-  //         dateRef: new Date(year, month, 1), // Usado apenas para ordenar no final
-  //       };
-  //     }
-
-  //     const amount = Number(t.amount);
-  //     if (t.type === 'INCOME') {
-  //       statsMap[key].income += amount;
-  //     } else if (t.type === 'EXPENSE') {
-  //       statsMap[key].expense += amount;
-  //     }
-  //   });
-
-  //   // 3. Converte para array e ordena cronologicamente
-  //   return Object.values(statsMap)
-  //     .sort((a, b) => a.dateRef.getTime() - b.dateRef.getTime())
-  //     .map(({ label, income, expense }) => ({
-  //       label,
-  //       income: Number(income.toFixed(2)),
-  //       expense: Number(expense.toFixed(2)),
-  //     }));
-  // }
-
   async getStats(userId: string) {
     const allTransactions = await db
       .select()
       .from(transactions)
       .where(eq(transactions.userId, userId));
 
-    console.log('Transações encontradas no banco:', allTransactions.length); // 👈 Veja se isso loga no terminal do seu NestJS
+    console.log('Transações encontradas no banco:', allTransactions.length);
 
     if (allTransactions.length === 0) return [];
 
@@ -272,7 +217,6 @@ export class TransactionsService {
     > = {};
 
     allTransactions.forEach((t) => {
-      // Garante que t.date seja um objeto Date válido
       const date = typeof t.date === 'string' ? new Date(t.date) : t.date;
 
       if (!date || isNaN(date.getTime())) return;
@@ -341,7 +285,6 @@ export class TransactionsService {
     const categoryMap: Record<string, number> = {};
 
     transactions.forEach((t) => {
-      // Filtramos apenas despesas para esse gráfico
       if (t.type === 'EXPENSE') {
         const rawCategory = t.category || 'Outros';
 
@@ -355,19 +298,19 @@ export class TransactionsService {
     });
 
     const colors = [
-      '#6366F1', // Indigo (Fica lindo como cor principal)
+      '#6366F1', // Indigo
       '#A855F7', // Purple
       '#F97316', // Orange
       '#F59E0B', // Amber
       '#EAB308', // Yellow
-      '#EF4444', // Red (Deixa para o final da fila)
+      '#EF4444', // Red
       '#64748B', // Slate
     ];
 
     return Object.entries(categoryMap).map(([name, value], index) => ({
       name,
       value,
-      fill: colors[index % colors.length], // Cicla entre as cores se houver muitas categorias
+      fill: colors[index % colors.length],
     }));
   }
 }
