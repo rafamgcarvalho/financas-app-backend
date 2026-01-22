@@ -207,8 +207,6 @@ export class TransactionsService {
       .from(transactions)
       .where(eq(transactions.userId, userId));
 
-    console.log('Transações encontradas no banco:', allTransactions.length);
-
     if (allTransactions.length === 0) return [];
 
     const statsMap: Record<
