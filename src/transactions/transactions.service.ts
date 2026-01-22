@@ -18,6 +18,7 @@ export class TransactionsService {
       dto.installments && dto.installments > 0 ? dto.installments : 1;
 
     const totalRepetitions = isRecurring ? 12 : installments;
+
     const groupId = totalRepetitions > 1 ? randomUUID() : null;
 
     for (let i = 0; i < totalRepetitions; i++) {
@@ -29,13 +30,18 @@ export class TransactionsService {
         ? Number(dto.amount)
         : Number(dto.amount) / totalRepetitions;
 
+      let finalTitle = dto.title;
+
+      if (isRecurring) {
+        finalTitle = `${dto.title} Recorrente`;
+      } else if (totalRepetitions > 1) {
+        finalTitle = `${dto.title} (${i + 1}/${totalRepetitions})`;
+      }
+
       transactionsToInsert.push({
         id: randomUUID(),
         userId,
-        title:
-          !isRecurring && totalRepetitions > 1
-            ? `${dto.title} (${i + 1}/${totalRepetitions})`
-            : `${dto.title} Recorrente`,
+        title: finalTitle,
         amount: finalAmount.toFixed(2),
         type: dto.type,
         category: dto.category,
@@ -46,12 +52,7 @@ export class TransactionsService {
       });
     }
 
-    const insertedTransactions = await db
-      .insert(transactions)
-      .values(transactionsToInsert)
-      .returning();
-
-    return insertedTransactions[0];
+    return await db.insert(transactions).values(transactionsToInsert);
   }
 
   /* Encontrar transações */
