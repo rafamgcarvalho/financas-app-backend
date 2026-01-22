@@ -1,11 +1,19 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 // src/transactions/transactions.controller.ts
-import { Controller, Post, Get, Body, UseGuards, Req } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Get,
+  Body,
+  UseGuards,
+  Req,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { TransactionsService } from './transactions.service';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
 import { AuthGuard } from '../auth/auth.guard';
-import { Query, Patch, Param, Delete } from '@nestjs/common';
+import { Query, Patch, Param, Delete, Request } from '@nestjs/common';
 
 @Controller('transactions')
 @UseGuards(AuthGuard)
@@ -41,8 +49,13 @@ export class TransactionsController {
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string, @Req() req: any) {
-    return this.transactionsService.remove(id, req.user.sub);
+  remove(
+    @Param('id') id: string,
+    @Req() req: any,
+    @Query('deleteAll') deleteAll?: string,
+  ) {
+    const shouldDeleteAll = deleteAll === 'true';
+    return this.transactionsService.remove(id, req.user.sub, shouldDeleteAll);
   }
 
   @Get('balance')
@@ -56,5 +69,16 @@ export class TransactionsController {
       month ? parseInt(month) : undefined,
       year ? parseInt(year) : undefined,
     );
+  }
+
+  @Get('range')
+  async getRange(@Req() req: any, @Query('type') type?: string) {
+    const userId = req.user?.id || req.user?.sub;
+
+    if (!userId) {
+      throw new UnauthorizedException('Usuário não identificado');
+    }
+
+    return this.transactionsService.getTransactionRange(userId, type);
   }
 }

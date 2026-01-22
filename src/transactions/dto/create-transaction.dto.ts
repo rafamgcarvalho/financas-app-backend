@@ -1,4 +1,3 @@
-// src/transactions/dto/create-transaction.dto.ts
 import {
   IsNotEmpty,
   IsNumber,
@@ -7,6 +6,7 @@ import {
   IsOptional,
   IsISO8601,
   IsBoolean,
+  Min,
 } from 'class-validator';
 
 export class CreateTransactionDto {
@@ -37,4 +37,9 @@ export class CreateTransactionDto {
   @IsBoolean()
   @IsOptional()
   isRecurring?: boolean;
+
+  @IsNumber()
+  @IsOptional()
+  @Min(1)
+  installments?: number;
 }
