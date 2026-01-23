@@ -30,9 +30,9 @@ export class CreateTransactionDto {
   @IsNotEmpty()
   category: string;
 
-  @IsEnum(['INCOME', 'EXPENSE'])
+  @IsEnum(['INCOME', 'EXPENSE', 'INVESTMENT'])
   @IsNotEmpty()
-  type: 'INCOME' | 'EXPENSE';
+  type: 'INCOME' | 'EXPENSE' | 'INVESTMENT';
 
   @IsBoolean()
   @IsOptional()
@@ -42,4 +42,8 @@ export class CreateTransactionDto {
   @IsOptional()
   @Min(1)
   installments?: number;
+
+  @IsString()
+  @IsOptional()
+  goalId?: string;
 }

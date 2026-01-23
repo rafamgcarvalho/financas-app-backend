@@ -2,7 +2,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable } from '@nestjs/common';
 import { db } from '../db/drizzle';
-import { transactions } from '../db/schema';
+import { goals, transactions } from '../db/schema';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
 import { and, eq, gte, lte, max, min, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
@@ -52,7 +52,42 @@ export class TransactionsService {
       });
     }
 
-    return await db.insert(transactions).values(transactionsToInsert);
+    const result = await db
+      .insert(transactions)
+      .values(transactionsToInsert)
+      .returning();
+
+    // REGRA DE NEGÓCIO: Se for investimento vinculado a uma meta, atualiza a meta
+    if (dto.type === 'INVESTMENT' && dto.goalId) {
+      const selectedGoalId: string = dto.goalId;
+      const totalAportado = Number(dto.amount) * (isRecurring ? 12 : 1);
+
+      await db
+        .update(goals)
+        .set({
+          currentValue: sql`${goals.currentValue} + ${totalAportado.toFixed(2)}`,
+        })
+        .where(eq(goals.id, selectedGoalId));
+
+      const [updatedGoal] = await db
+        .select()
+        .from(goals)
+        .where(eq(goals.id, selectedGoalId));
+
+      if (updatedGoal) {
+        const current = Number(updatedGoal.currentValue);
+        const target = Number(updatedGoal.targetValue);
+
+        if (current >= target && updatedGoal.status !== 'COMPLETED') {
+          await db
+            .update(goals)
+            .set({ status: 'COMPLETED' })
+            .where(eq(goals.id, selectedGoalId));
+        }
+      }
+    }
+
+    return result;
   }
 
   /* Encontrar transações */
