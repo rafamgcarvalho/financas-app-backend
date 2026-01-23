@@ -16,11 +16,35 @@ import {
 export const transactionTypeEnum = pgEnum('transaction_type', [
   'INCOME',
   'EXPENSE',
+  'INVESTMENT',
+]);
+
+/**
+ * Tipo da meta
+ */
+export const goalTypeEnum = pgEnum('goal_type', ['SHORT', 'MEDIUM', 'LONG']);
+
+/**
+ * Tipo do status da meta
+ */
+export const goalStatusEnum = pgEnum('goal_status', [
+  'ACTIVE',
+  'PAUSED',
+  'COMPLETED',
+]);
+
+/**
+ * Tipo da prioridade da meta
+ */
+export const metaPriorityEnum = pgEnum('meta_priority', [
+  'ESSENTIAL',
+  'IMPORTANT',
+  'DESIRABLE',
 ]);
 
 /**
  * Usuário
- * Login básico: email + senha
+ * Login básico: username + senha
  */
 export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -28,6 +52,34 @@ export const users = pgTable('users', {
   username: varchar('username', { length: 150 }).notNull().unique(),
   password: varchar('password', { length: 255 }).notNull(),
   createdAt: timestamp('created_at').defaultNow(),
+});
+
+/**
+ * Metas de investimento
+ */
+
+export const goals = pgTable('goals', {
+  id: uuid('id').defaultRandom().primaryKey(),
+
+  userId: uuid('user_id')
+    .references(() => users.id)
+    .notNull(),
+
+  title: varchar('title', { length: 50 }).notNull(),
+  description: varchar('description', { length: 100 }),
+
+  targetValue: numeric('targetValue').notNull(),
+  currentValue: numeric('currentValue').default('0'),
+
+  startDate: timestamp('startDate').notNull(),
+  targetDate: timestamp('targetDate'),
+
+  type: goalTypeEnum('type').notNull(),
+  status: goalStatusEnum('status').notNull(),
+  priority: metaPriorityEnum('priority').default('IMPORTANT').notNull(),
+
+  createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').defaultNow(),
 });
 
 /**
@@ -55,4 +107,6 @@ export const transactions = pgTable('transactions', {
   groupId: text('group_id'),
 
   createdAt: timestamp('created_at').defaultNow(),
+
+  goalId: uuid('goal_id').references(() => goals.id),
 });
