@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
 import { Body, Controller, Req, UseGuards, Post, Get } from '@nestjs/common';
 import { GoalsService } from './goals.service';
 import { AuthGuard } from 'src/auth/auth.guard';
