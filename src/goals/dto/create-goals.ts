@@ -7,7 +7,7 @@ import {
   IsString,
 } from 'class-validator';
 
-export class createGoalsDto {
+export class CreateGoalsDto {
   @IsString()
   @IsNotEmpty()
   title: string;

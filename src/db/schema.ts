@@ -108,5 +108,7 @@ export const transactions = pgTable('transactions', {
 
   createdAt: timestamp('created_at').defaultNow(),
 
-  goalId: uuid('goal_id').references(() => goals.id),
+  goalId: uuid('goal_id').references(() => goals.id, {
+    onDelete: 'cascade',
+  }),
 });

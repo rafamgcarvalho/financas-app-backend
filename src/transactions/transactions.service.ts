@@ -49,6 +49,7 @@ export class TransactionsService {
         isRecurring: isRecurring,
         installments: totalRepetitions,
         groupId: groupId,
+        goalId: dto.goalId,
       });
     }
 
@@ -158,6 +159,7 @@ export class TransactionsService {
 
   /* Excluir */
   async remove(id: string, userId: string, deleteAll?: boolean) {
+    // 1. Buscamos a transação antes de deletar
     const [transaction] = await db
       .select()
       .from(transactions)
@@ -165,8 +167,11 @@ export class TransactionsService {
 
     if (!transaction) return null;
 
+    // Tipando explicitamente o que esperamos do Drizzle
+    let deletedResult: (typeof transactions.$inferSelect)[];
+
     if ((transaction.isRecurring || deleteAll) && transaction.groupId) {
-      return await db
+      deletedResult = await db
         .delete(transactions)
         .where(
           and(
@@ -175,14 +180,34 @@ export class TransactionsService {
           ),
         )
         .returning();
+    } else {
+      const result = await db
+        .delete(transactions)
+        .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
+        .returning();
+      deletedResult = result;
     }
 
-    const [deleted] = await db
-      .delete(transactions)
-      .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
-      .returning();
+    // 2. REGRA DE ESTORNO
+    if (transaction.type === 'INVESTMENT' && transaction.goalId) {
+      const amountToSubtract = Number(transaction.amount);
 
-    return deleted;
+      // Agora o TS sabe que deletedResult é um array, acabando com o erro de unsafe member access
+      const totalEffect =
+        (transaction.isRecurring || deleteAll) && transaction.groupId
+          ? amountToSubtract * deletedResult.length
+          : amountToSubtract;
+
+      await db
+        .update(goals)
+        .set({
+          currentValue: sql`${goals.currentValue} - ${totalEffect.toFixed(2)}`,
+          status: 'ACTIVE',
+        })
+        .where(eq(goals.id, transaction.goalId));
+    }
+
+    return deletedResult;
   }
 
   /* Balanço */
@@ -193,7 +218,13 @@ export class TransactionsService {
       (acc, transaction) => {
         const amount = Number(transaction.amount);
         if (transaction.type === 'INCOME') acc.income += amount;
-        if (transaction.type === 'EXPENSE') acc.expense += amount;
+
+        if (
+          transaction.type === 'EXPENSE' ||
+          transaction.type === 'INVESTMENT'
+        ) {
+          acc.expense += amount;
+        }
         return acc;
       },
       { income: 0, expense: 0 },
