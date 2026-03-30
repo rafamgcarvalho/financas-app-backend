@@ -93,26 +93,20 @@ export class TransactionsService {
 
   /* Encontrar transações */
   async findAllById(userId: string, month?: number, year?: number) {
-    const targetMonth = month || new Date().getMonth() + 1;
-    const targetYear = year || new Date().getFullYear();
+    const conditions = [eq(transactions.userId, userId)];
 
-    const startDate = new Date(
-      Date.UTC(targetYear, targetMonth - 1, 1, 0, 0, 0),
-    );
-    const endDate = new Date(
-      Date.UTC(targetYear, targetMonth, 0, 23, 59, 59, 999),
-    );
+    if (month !== undefined && year !== undefined) {
+      const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
+      const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+
+      conditions.push(gte(transactions.date, startDate));
+      conditions.push(lte(transactions.date, endDate));
+    }
 
     return await db
       .select()
       .from(transactions)
-      .where(
-        and(
-          eq(transactions.userId, userId),
-          gte(transactions.date, startDate),
-          lte(transactions.date, endDate),
-        ),
-      )
+      .where(and(...conditions))
       .orderBy(sql`${transactions.date} DESC`);
   }
 
@@ -133,26 +127,87 @@ export class TransactionsService {
       date: dto.date ? new Date(dto.date) : undefined,
     };
 
-    if (original.isRecurring && original.groupId) {
-      const { date, ...dataWithoutDate } = updateData;
+    const filteredUpdateData = Object.entries(updateData).reduce(
+      (acc, [key, value]) => {
+        if (value !== undefined) {
+          acc[key] = value;
+        }
+        return acc;
+      },
+      {} as Record<string, any>,
+    );
 
-      return await db
-        .update(transactions)
-        .set(dataWithoutDate)
-        .where(
-          and(
-            eq(transactions.groupId, original.groupId),
-            eq(transactions.userId, userId),
-          ),
+    const appliesToGroup = !!original.groupId;
+    const groupCondition = appliesToGroup
+      ? and(
+          eq(transactions.groupId, original.groupId as string),
+          eq(transactions.userId, userId),
         )
-        .returning();
-    }
+      : undefined;
 
-    const [updated] = await db
-      .update(transactions)
-      .set(updateData)
-      .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
-      .returning();
+    const totalRecords = appliesToGroup
+      ? await db
+          .select({ count: sql`COUNT(*)::int` })
+          .from(transactions)
+          .where(groupCondition)
+          .then((result) => Number(result[0]?.count || 0))
+      : 1;
+
+    const originalAmount = Number(original.amount);
+    const originalTotalAmount = original.isRecurring ? originalAmount * 12 : originalAmount * totalRecords;
+
+    const dataWithoutDate = (({ date, ...rest }) => rest)(filteredUpdateData);
+
+    const [updated] = appliesToGroup
+      ? await db
+          .update(transactions)
+          .set(dataWithoutDate)
+          .where(groupCondition)
+          .returning()
+      : await db
+          .update(transactions)
+          .set(filteredUpdateData)
+          .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
+          .returning();
+
+    if (original.type === 'INVESTMENT' && original.goalId) {
+      const updatedAmount = dto.amount !== undefined ? Number(dto.amount) : originalAmount;
+      const updatedTotalAmount = original.isRecurring
+        ? updatedAmount * 12
+        : updatedAmount * totalRecords;
+      const diff = updatedTotalAmount - originalTotalAmount;
+
+      if (diff !== 0) {
+        await db
+          .update(goals)
+          .set({
+            currentValue: sql`${goals.currentValue} + ${diff.toFixed(2)}`,
+          })
+          .where(eq(goals.id, original.goalId));
+      }
+
+      const [goal] = await db
+        .select()
+        .from(goals)
+        .where(eq(goals.id, original.goalId));
+
+      if (goal) {
+        const current = Number(goal.currentValue);
+        const target = Number(goal.targetValue);
+
+        if (current >= target && goal.status !== 'COMPLETED') {
+          await db
+            .update(goals)
+            .set({ status: 'COMPLETED' })
+            .where(eq(goals.id, original.goalId));
+        } else if (current < target && goal.status === 'COMPLETED') {
+          await db
+            .update(goals)
+            .set({ status: 'ACTIVE' })
+            .where(eq(goals.id, original.goalId));
+        }
+      }
+    }
 
     return updated;
   }
