@@ -32,7 +32,7 @@ export class GoalsController {
     return this.goalsService.getAll(userId);
   }
 
-  @Get(':id') // Esta é a rota que estava faltando!
+  @Get(':id')
   getOne(@Param('id') id: string, @Req() req: any) {
     const userId = req.user.sub;
     return this.goalsService.getOne(id, userId);
@@ -50,5 +50,30 @@ export class GoalsController {
   @Delete(':id')
   remove(@Param('id') id: string, @Req() req: any) {
     return this.goalsService.remove(id, req.user.sub);
+  }
+
+  /* ========== MEMBROS ========== */
+
+  @Post(':id/members')
+  addMember(
+    @Param('id') goalId: string,
+    @Req() req: any,
+    @Body('username') username: string,
+  ) {
+    return this.goalsService.addMember(goalId, req.user.sub, username);
+  }
+
+  @Get(':id/members')
+  getMembers(@Param('id') goalId: string, @Req() req: any) {
+    return this.goalsService.getMembers(goalId, req.user.sub);
+  }
+
+  @Delete(':id/members/:memberId')
+  removeMember(
+    @Param('id') goalId: string,
+    @Param('memberId') memberId: string,
+    @Req() req: any,
+  ) {
+    return this.goalsService.removeMember(goalId, req.user.sub, memberId);
   }
 }

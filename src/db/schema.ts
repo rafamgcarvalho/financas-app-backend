@@ -8,6 +8,7 @@ import {
   pgEnum,
   integer,
   text,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 /**
@@ -112,3 +113,33 @@ export const transactions = pgTable('transactions', {
     onDelete: 'cascade',
   }),
 });
+
+/**
+ * Role do membro na meta (dono ou participante)
+ */
+export const goalRoleEnum = pgEnum('goal_role', ['OWNER', 'MEMBER']);
+
+/**
+ * Membros de uma meta (relacionamento N:N entre usuários e metas)
+ */
+export const goalMembers = pgTable(
+  'goal_members',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    goalId: uuid('goal_id')
+      .references(() => goals.id, { onDelete: 'cascade' })
+      .notNull(),
+
+    userId: uuid('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+
+    role: goalRoleEnum('role').notNull(),
+
+    joinedAt: timestamp('joined_at').defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('goal_members_goal_user_idx').on(table.goalId, table.userId),
+  ],
+);
