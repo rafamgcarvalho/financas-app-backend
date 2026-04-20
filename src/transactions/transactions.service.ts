@@ -2,13 +2,15 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable } from '@nestjs/common';
 import { db } from '../db/drizzle';
-import { goals, transactions } from '../db/schema';
+import { goals, transactions, goalMembers, users } from '../db/schema';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
-import { and, eq, gte, lte, max, min, sql } from 'drizzle-orm';
+import { and, eq, gte, lte, max, min, sql, or, inArray } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
+import { GoalsGateway } from '../goals/goals.gateway';
 
 @Injectable()
 export class TransactionsService {
+  constructor(private readonly goalsGateway: GoalsGateway) {}
   async create(dto: CreateTransactionDto, userId: string) {
     const transactionsToInsert: (typeof transactions.$inferInsert)[] = [];
 
@@ -86,13 +88,37 @@ export class TransactionsService {
             .where(eq(goals.id, selectedGoalId));
         }
       }
+
+      // Busca o nome do usuário para notificar via WebSocket
+      const [user] = await db
+        .select({ name: users.name })
+        .from(users)
+        .where(eq(users.id, userId));
+
+      this.goalsGateway.notifyGoalUpdated({
+        goalId: selectedGoalId,
+        currentValue: updatedGoal?.currentValue || '0',
+        userName: user?.name || 'Alguém',
+        amount: Number(dto.amount),
+        action: 'created',
+      });
     }
 
     return result;
   }
 
   /* Encontrar transações */
-  async findAllById(userId: string, month?: number, year?: number) {
+  async findAllById(
+    userId: string,
+    month?: number,
+    year?: number,
+    goalId?: string,
+  ) {
+    // Se tiver goalId, busca transações de TODOS os membros da meta
+    if (goalId) {
+      return this.findByGoalId(goalId, userId);
+    }
+
     const conditions = [eq(transactions.userId, userId)];
 
     if (month !== undefined && year !== undefined) {
@@ -108,6 +134,52 @@ export class TransactionsService {
       .from(transactions)
       .where(and(...conditions))
       .orderBy(sql`${transactions.date} DESC`);
+  }
+
+  /**
+   * Busca aportes de TODOS os membros de uma meta,
+   * incluindo o nome do autor de cada transação.
+   */
+  async findByGoalId(goalId: string, requestingUserId: string) {
+    // Verifica se o usuário é membro da meta
+    const [membership] = await db
+      .select()
+      .from(goalMembers)
+      .where(
+        and(
+          eq(goalMembers.goalId, goalId),
+          eq(goalMembers.userId, requestingUserId),
+        ),
+      );
+
+    if (!membership) {
+      return [];
+    }
+
+    // Busca todas as transações dessa meta, com JOIN em users para pegar o nome
+    const result = await db
+      .select({
+        id: transactions.id,
+        userId: transactions.userId,
+        title: transactions.title,
+        amount: transactions.amount,
+        description: transactions.description,
+        date: transactions.date,
+        category: transactions.category,
+        type: transactions.type,
+        isRecurring: transactions.isRecurring,
+        installments: transactions.installments,
+        groupId: transactions.groupId,
+        createdAt: transactions.createdAt,
+        goalId: transactions.goalId,
+        userName: users.name,
+      })
+      .from(transactions)
+      .innerJoin(users, eq(transactions.userId, users.id))
+      .where(eq(transactions.goalId, goalId))
+      .orderBy(sql`${transactions.date} DESC`);
+
+    return result;
   }
 
   /* Editar transação */
@@ -207,6 +279,20 @@ export class TransactionsService {
             .where(eq(goals.id, original.goalId));
         }
       }
+
+      // Notifica via WebSocket
+      const [user] = await db
+        .select({ name: users.name })
+        .from(users)
+        .where(eq(users.id, userId));
+
+      this.goalsGateway.notifyGoalUpdated({
+        goalId: original.goalId,
+        currentValue: goal?.currentValue || '0',
+        userName: user?.name || 'Alguém',
+        amount: updatedAmount,
+        action: 'updated',
+      });
     }
 
     return updated;
@@ -260,6 +346,25 @@ export class TransactionsService {
           status: 'ACTIVE',
         })
         .where(eq(goals.id, transaction.goalId));
+
+      // Busca meta atualizada e notifica via WebSocket
+      const [updatedGoal] = await db
+        .select()
+        .from(goals)
+        .where(eq(goals.id, transaction.goalId));
+
+      const [user] = await db
+        .select({ name: users.name })
+        .from(users)
+        .where(eq(users.id, userId));
+
+      this.goalsGateway.notifyGoalUpdated({
+        goalId: transaction.goalId,
+        currentValue: updatedGoal?.currentValue || '0',
+        userName: user?.name || 'Alguém',
+        amount: totalEffect,
+        action: 'deleted',
+      });
     }
 
     return deletedResult;

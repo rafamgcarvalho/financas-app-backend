@@ -30,11 +30,13 @@ export class TransactionsController {
     @Req() req: any,
     @Query('month') month?: string,
     @Query('year') year?: string,
+    @Query('goalId') goalId?: string,
   ) {
     return this.transactionsService.findAllById(
       req.user.sub,
       month ? parseInt(month) : undefined,
       year ? parseInt(year) : undefined,
+      goalId,
     );
   }
 

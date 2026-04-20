@@ -20,7 +20,7 @@ export class CreateTransactionDto {
 
   @IsString()
   @IsOptional()
-  description?: string;
+  description?: string | null;
 
   @IsISO8601()
   @IsNotEmpty()
