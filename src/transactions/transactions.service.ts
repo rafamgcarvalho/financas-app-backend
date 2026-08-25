@@ -8,6 +8,18 @@ import { and, eq, gte, lte, max, min, sql, or, inArray } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { GoalsGateway } from '../goals/goals.gateway';
 
+type TransactionType = 'INCOME' | 'EXPENSE' | 'INVESTMENT';
+
+const TRANSACTION_TYPES: TransactionType[] = ['INCOME', 'EXPENSE', 'INVESTMENT'];
+
+/** Aceita "expense", "EXPENSE"... e ignora qualquer coisa fora do enum. */
+function normalizeTransactionType(type?: string): TransactionType | undefined {
+  if (!type || type === 'all') return undefined;
+
+  const upper = type.toUpperCase() as TransactionType;
+  return TRANSACTION_TYPES.includes(upper) ? upper : undefined;
+}
+
 @Injectable()
 export class TransactionsService {
   constructor(private readonly goalsGateway: GoalsGateway) {}
@@ -28,28 +40,27 @@ export class TransactionsService {
 
       currentDate.setUTCMonth(currentDate.getUTCMonth() + i);
 
+      // Recorrente repete o mesmo valor todo mês; parcelado divide o total.
       const finalAmount = isRecurring
         ? Number(dto.amount)
         : Number(dto.amount) / totalRepetitions;
 
-      let finalTitle = dto.title;
-
-      if (isRecurring) {
-        finalTitle = `${dto.title} Recorrente`;
-      } else if (totalRepetitions > 1) {
-        finalTitle = `${dto.title} (${i + 1}/${totalRepetitions})`;
-      }
-
       transactionsToInsert.push({
         id: randomUUID(),
         userId,
-        title: finalTitle,
+        // O título fica limpo: a posição da parcela vive em installmentNumber,
+        // e a recorrência já é indicada por isRecurring.
+        title: dto.title,
         amount: finalAmount.toFixed(2),
+        description: dto.description ?? null,
         type: dto.type,
         category: dto.category,
         date: currentDate,
         isRecurring: isRecurring,
         installments: totalRepetitions,
+        // Só parcelamento numera: em recorrente "parcela 3 de 12" enganaria,
+        // e é assim que o backfill da migração 0003 trata os dados antigos.
+        installmentNumber: !isRecurring && totalRepetitions > 1 ? i + 1 : null,
         groupId: groupId,
         goalId: dto.goalId,
       });
@@ -113,6 +124,7 @@ export class TransactionsService {
     month?: number,
     year?: number,
     goalId?: string,
+    type?: string,
   ) {
     // Se tiver goalId, busca transações de TODOS os membros da meta
     if (goalId) {
@@ -120,6 +132,13 @@ export class TransactionsService {
     }
 
     const conditions = [eq(transactions.userId, userId)];
+
+    // As telas de Receitas e Despesas pedem um tipo só; sem este filtro elas
+    // baixavam o mês inteiro e descartavam o resto no navegador.
+    const normalizedType = normalizeTransactionType(type);
+    if (normalizedType) {
+      conditions.push(eq(transactions.type, normalizedType));
+    }
 
     if (month !== undefined && year !== undefined) {
       const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
@@ -169,6 +188,7 @@ export class TransactionsService {
         type: transactions.type,
         isRecurring: transactions.isRecurring,
         installments: transactions.installments,
+        installmentNumber: transactions.installmentNumber,
         groupId: transactions.groupId,
         createdAt: transactions.createdAt,
         goalId: transactions.goalId,
@@ -399,9 +419,9 @@ export class TransactionsService {
   async getTransactionRange(userId: string, type?: string) {
     const whereConditions = [eq(transactions.userId, userId)];
 
-    if (type && type !== 'all') {
-      const validType = type.toUpperCase() as 'INCOME' | 'EXPENSE';
-      whereConditions.push(eq(transactions.type, validType));
+    const normalizedType = normalizeTransactionType(type);
+    if (normalizedType) {
+      whereConditions.push(eq(transactions.type, normalizedType));
     }
 
     const [first] = await db
@@ -493,48 +513,45 @@ export class TransactionsService {
       const amount = Number(t.amount);
       if (t.type === 'INCOME') stats.income += amount;
       else if (t.type === 'EXPENSE') stats.expense += amount;
-      // Se no futuro você tiver o type 'INVESTMENT', colocar o else if aqui
+      else if (t.type === 'INVESTMENT') stats.investment += amount;
     });
 
+    // As cores ficam por conta do frontend, que tem a paleta por tipo.
     return [
-      { name: 'Receitas', valor: stats.income, fill: '#42B7B2' },
-      { name: 'Despesas', valor: stats.expense, fill: '#EF4444' },
-      { name: 'Investimento', valor: stats.investment, fill: '#3B82F6' },
+      { name: 'Receitas', valor: stats.income },
+      { name: 'Despesas', valor: stats.expense },
+      { name: 'Investimentos', valor: stats.investment },
     ];
   }
 
+  /**
+   * Total gasto por categoria no mês.
+   *
+   * Devolve a chave crua da categoria ("alimentacao"), e não um rótulo
+   * capitalizado: quem sabe o nome de exibição e a cor de cada categoria é o
+   * frontend, que tem o cadastro. Antes o retorno vinha como "Alimentacao",
+   * sem acento e com uma cor de paleta rotativa que não batia com a do resto
+   * da interface.
+   */
   async getCategoryStats(userId: string, month: number, year: number) {
     const transactions = await this.findAllById(userId, month, year);
 
     const categoryMap: Record<string, number> = {};
 
     transactions.forEach((t) => {
-      if (t.type === 'EXPENSE') {
-        const rawCategory = t.category || 'Outros';
+      if (t.type !== 'EXPENSE') return;
 
-        const formattedCategory =
-          rawCategory.charAt(0).toUpperCase() +
-          rawCategory.slice(1).toLowerCase();
-
-        categoryMap[formattedCategory] =
-          (categoryMap[formattedCategory] || 0) + Number(t.amount);
-      }
+      const category = t.category || 'outros';
+      categoryMap[category] = (categoryMap[category] || 0) + Number(t.amount);
     });
 
-    const colors = [
-      '#6366F1', // Indigo
-      '#A855F7', // Purple
-      '#F97316', // Orange
-      '#F59E0B', // Amber
-      '#EAB308', // Yellow
-      '#EF4444', // Red
-      '#64748B', // Slate
-    ];
-
-    return Object.entries(categoryMap).map(([name, value], index) => ({
-      name,
-      value,
-      fill: colors[index % colors.length],
-    }));
+    return Object.entries(categoryMap)
+      .map(([category, value]) => ({
+        category,
+        // `name` continua presente para não quebrar consumidores antigos.
+        name: category,
+        value: Number(value.toFixed(2)),
+      }))
+      .sort((a, b) => b.value - a.value);
   }
 }
