@@ -105,6 +105,12 @@ export const transactions = pgTable('transactions', {
   isRecurring: boolean('is_recurring').default(false),
 
   installments: integer('installments').default(1),
+  /**
+   * Posição desta parcela dentro do grupo (1 de 12, 2 de 12...).
+   * Antes esse número só existia embutido no título, o que impedia a interface
+   * de exibi-lo separadamente e sujava o nome do lançamento.
+   */
+  installmentNumber: integer('installment_number'),
   groupId: text('group_id'),
 
   createdAt: timestamp('created_at').defaultNow(),
