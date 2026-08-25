@@ -203,7 +203,22 @@ export class TransactionsService {
   }
 
   /* Editar transação */
-  async update(id: string, userId: string, dto: Partial<CreateTransactionDto>) {
+  /**
+   * Edita uma transação.
+   *
+   * `updateAll` decide o alcance quando o lançamento faz parte de um grupo
+   * (parcelamento ou recorrência), espelhando o que remove() já fazia com
+   * `deleteAll`. Antes a edição atingia o grupo inteiro sem perguntar, o que
+   * surpreendia quem só queria corrigir uma parcela.
+   *
+   * A data nunca se propaga: ela é o que distingue uma parcela da outra.
+   */
+  async update(
+    id: string,
+    userId: string,
+    dto: Partial<CreateTransactionDto>,
+    updateAll = false,
+  ) {
     const [original] = await db
       .select()
       .from(transactions)
@@ -229,7 +244,7 @@ export class TransactionsService {
       {} as Record<string, any>,
     );
 
-    const appliesToGroup = !!original.groupId;
+    const appliesToGroup = !!original.groupId && updateAll;
     const groupCondition = appliesToGroup
       ? and(
           eq(transactions.groupId, original.groupId as string),
@@ -246,7 +261,9 @@ export class TransactionsService {
       : 1;
 
     const originalAmount = Number(original.amount);
-    const originalTotalAmount = original.isRecurring ? originalAmount * 12 : originalAmount * totalRecords;
+    // Quando a edição vale só para esta linha, o efeito na meta é o dela apenas.
+    const affectedRecords = appliesToGroup ? totalRecords : 1;
+    const originalTotalAmount = originalAmount * affectedRecords;
 
     const dataWithoutDate = (({ date, ...rest }) => rest)(filteredUpdateData);
 
@@ -264,9 +281,7 @@ export class TransactionsService {
 
     if (original.type === 'INVESTMENT' && original.goalId) {
       const updatedAmount = dto.amount !== undefined ? Number(dto.amount) : originalAmount;
-      const updatedTotalAmount = original.isRecurring
-        ? updatedAmount * 12
-        : updatedAmount * totalRecords;
+      const updatedTotalAmount = updatedAmount * affectedRecords;
       const diff = updatedTotalAmount - originalTotalAmount;
 
       if (diff !== 0) {

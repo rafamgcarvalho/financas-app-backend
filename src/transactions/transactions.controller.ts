@@ -47,8 +47,14 @@ export class TransactionsController {
     @Param('id') id: string,
     @Req() req: any,
     @Body() dto: Partial<CreateTransactionDto>,
+    @Query('updateAll') updateAll?: string,
   ) {
-    return this.transactionsService.update(id, req.user.sub, dto);
+    return this.transactionsService.update(
+      id,
+      req.user.sub,
+      dto,
+      updateAll === 'true',
+    );
   }
 
   @Delete(':id')
