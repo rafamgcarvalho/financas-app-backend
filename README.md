@@ -1,25 +1,109 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Finanças App — API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Backend do [financas-app](../financas-app): NestJS + Drizzle ORM sobre PostgreSQL,
+com WebSocket para atualizar metas compartilhadas em tempo real.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Rodando localmente
+
+### 1. Banco de dados
+
+Com Docker:
+
+```bash
+docker compose up -d
+```
+
+Sem Docker, via Homebrew (macOS):
+
+```bash
+brew install postgresql@15
+brew services start postgresql@15
+
+# usuário e banco com as mesmas credenciais do docker-compose.yml
+psql -d postgres -c "ALTER ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'root'" \
+  || psql -d postgres -c "CREATE ROLE postgres LOGIN SUPERUSER PASSWORD 'root'"
+psql -d postgres -c "CREATE DATABASE financias_local OWNER postgres"
+```
+
+Os dois caminhos produzem a mesma string de conexão, então dá para alternar
+entre eles sem mexer no `.env`.
+
+### 2. Variáveis de ambiente
+
+```bash
+cp .env.example .env
+```
+
+| Variável | Para que serve |
+| --- | --- |
+| `DATABASE_URL` | Conexão com o Postgres. O SSL liga sozinho quando o host não é local. |
+| `JWT_SECRET` | Assina os tokens. Use um valor longo e aleatório em produção. |
+| `PORT` | Porta da API (padrão 3001). |
+
+### 3. Migrações e execução
+
+```bash
+npm install
+npm run db:migrate
+npm run start:dev
+```
+
+## Scripts
+
+| Comando | O que faz |
+| --- | --- |
+| `npm run start:dev` | API em watch mode |
+| `npm run build` | Compila para `dist/` |
+| `npm run db:generate` | Gera uma migração a partir de `src/db/schema.ts` |
+| `npm run db:migrate` | Aplica as migrações pendentes |
+| `npm run db:studio` | Abre o Drizzle Studio |
+| `npm test` | Testes unitários |
+
+## Como as transações funcionam
+
+Um lançamento pode gerar várias linhas na tabela `transactions`:
+
+- **À vista** — uma linha.
+- **Parcelado** — `installments` linhas, uma por mês a partir de `date`. O
+  `amount` enviado é o **total**, e cada linha guarda `amount / installments`.
+  A posição de cada parcela fica em `installmentNumber`.
+- **Recorrente** — 12 linhas mensais com o valor cheio em cada uma.
+  Recorrentes não recebem `installmentNumber`: elas repetem um gasto, não
+  dividem uma compra.
+
+Linhas geradas juntas compartilham um `groupId`, que é o que permite editar ou
+excluir o conjunto:
+
+- `DELETE /transactions/:id?deleteAll=true` remove o grupo inteiro.
+- `PATCH /transactions/:id?updateAll=true` edita o grupo inteiro.
+
+Sem esses parâmetros, ambos afetam apenas o lançamento indicado. A **data**
+nunca se propaga para o grupo — é justamente ela que distingue uma parcela da
+seguinte.
+
+## Endpoints
+
+| Método | Rota | Observações |
+| --- | --- | --- |
+| `POST` | `/users` | Cadastro |
+| `POST` | `/auth/login` | Devolve `access_token` |
+| `GET` | `/users/:username` | Perfil público |
+| `GET` | `/transactions` | Filtros: `month`, `year`, `type`, `goalId` |
+| `POST` | `/transactions` | Cria (pode gerar várias linhas) |
+| `PATCH` | `/transactions/:id` | `?updateAll=true` para o grupo |
+| `DELETE` | `/transactions/:id` | `?deleteAll=true` para o grupo |
+| `GET` | `/transactions/range` | Primeira e última data; aceita `type` |
+| `GET` | `/transactions/stats` | Série mensal de receitas x despesas |
+| `GET` | `/transactions/stats/comparison` | Totais do mês por tipo |
+| `GET` | `/transactions/stats/categories` | Gasto por categoria (chave crua) |
+| `GET` | `/goals` … | Metas e membros |
+
+As categorias são texto livre: quem define rótulo, ícone e cor é o frontend.
+
+---
+
+<details>
+<summary>Boilerplate original do NestJS</summary>
 
 ## Description
 
@@ -96,3 +180,5 @@ Nest is an MIT-licensed open source project. It can grow thanks to the sponsors 
 ## License
 
 Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+
+</details>
