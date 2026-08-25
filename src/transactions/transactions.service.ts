@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+
 import { Injectable } from '@nestjs/common';
 import { db } from '../db/drizzle';
 import { goals, transactions, goalMembers, users } from '../db/schema';
@@ -10,7 +10,11 @@ import { GoalsGateway } from '../goals/goals.gateway';
 
 type TransactionType = 'INCOME' | 'EXPENSE' | 'INVESTMENT';
 
-const TRANSACTION_TYPES: TransactionType[] = ['INCOME', 'EXPENSE', 'INVESTMENT'];
+const TRANSACTION_TYPES: TransactionType[] = [
+  'INCOME',
+  'EXPENSE',
+  'INVESTMENT',
+];
 
 /** Aceita "expense", "EXPENSE"... e ignora qualquer coisa fora do enum. */
 function normalizeTransactionType(type?: string): TransactionType | undefined {
@@ -280,7 +284,8 @@ export class TransactionsService {
           .returning();
 
     if (original.type === 'INVESTMENT' && original.goalId) {
-      const updatedAmount = dto.amount !== undefined ? Number(dto.amount) : originalAmount;
+      const updatedAmount =
+        dto.amount !== undefined ? Number(dto.amount) : originalAmount;
       const updatedTotalAmount = updatedAmount * affectedRecords;
       const diff = updatedTotalAmount - originalTotalAmount;
 

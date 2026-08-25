@@ -64,9 +64,7 @@ export class GoalsService {
     const allGoals = await db
       .select()
       .from(goals)
-      .where(
-        or(...goalIds.map((id) => eq(goals.id, id))),
-      )
+      .where(or(...goalIds.map((id) => eq(goals.id, id))))
       .orderBy(desc(goals.createdAt));
 
     // Busca todos os membros de todas essas metas de uma vez
@@ -82,9 +80,7 @@ export class GoalsService {
       })
       .from(goalMembers)
       .innerJoin(users, eq(goalMembers.userId, users.id))
-      .where(
-        or(...goalIds.map((id) => eq(goalMembers.goalId, id))),
-      );
+      .where(or(...goalIds.map((id) => eq(goalMembers.goalId, id))));
 
     // Agrupa membros por goalId
     const membersByGoal = new Map<string, typeof allMembers>();
@@ -236,11 +232,7 @@ export class GoalsService {
     };
   }
 
-  async removeMember(
-    goalId: string,
-    ownerUserId: string,
-    memberId: string,
-  ) {
+  async removeMember(goalId: string, ownerUserId: string, memberId: string) {
     // Apenas o OWNER pode remover membros
     await this.assertOwner(goalId, ownerUserId);
 
@@ -272,7 +264,9 @@ export class GoalsService {
     const [membership] = await db
       .select()
       .from(goalMembers)
-      .where(and(eq(goalMembers.goalId, goalId), eq(goalMembers.userId, userId)));
+      .where(
+        and(eq(goalMembers.goalId, goalId), eq(goalMembers.userId, userId)),
+      );
 
     if (!membership) {
       throw new NotFoundException('Meta não encontrada');

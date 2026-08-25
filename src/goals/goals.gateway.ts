@@ -86,7 +86,8 @@ export class GoalsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const sockets = await this.server.fetchSockets();
     for (const socket of sockets) {
       if (socket.data.userId === userId) {
-        await socket.join(`goal:${goalId}`);
+        // fetchSockets() devolve RemoteSocket, cujo join() é síncrono.
+        socket.join(`goal:${goalId}`);
       }
     }
   }
