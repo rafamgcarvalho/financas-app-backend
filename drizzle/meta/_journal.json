@@ -29,6 +29,13 @@
       "when": 1787693137138,
       "tag": "0003_young_terrax",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787749350295,
+      "tag": "0004_wet_stone_men",
+      "breakpoints": true
     }
   ]
 }

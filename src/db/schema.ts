@@ -72,6 +72,15 @@ export const goals = pgTable('goals', {
   targetValue: numeric('targetValue').notNull(),
   currentValue: numeric('currentValue').default('0'),
 
+  /**
+   * Quanto a pessoa pretende aportar por mês.
+   *
+   * Serve de base para a projeção. Sem isto, um aporte atípico num mês
+   * distorcia a média e a data de conclusão saltava — declarar a intenção
+   * mantém a projeção estável e transforma o aporte extra em adiantamento.
+   */
+  monthlyPlan: numeric('monthly_plan'),
+
   startDate: timestamp('startDate').notNull(),
   targetDate: timestamp('targetDate'),
 

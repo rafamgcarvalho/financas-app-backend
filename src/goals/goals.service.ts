@@ -33,6 +33,10 @@ export class GoalsService {
         type: dto.type,
         status: dto.status,
         priority: dto.priority,
+        monthlyPlan:
+          dto.monthlyPlan === undefined || dto.monthlyPlan === null
+            ? null
+            : dto.monthlyPlan.toString(),
       })
       .returning();
 
@@ -146,11 +150,15 @@ export class GoalsService {
     // Apenas o OWNER pode editar
     await this.assertOwner(id, userId);
 
-    const { targetValue, startDate, targetDate, ...rest } = dto;
+    const { targetValue, startDate, targetDate, monthlyPlan, ...rest } = dto;
 
     const updateData = {
       ...rest,
       ...(targetValue !== undefined && { targetValue: targetValue.toString() }),
+      // null é significativo aqui: limpa o plano e devolve a projeção ao ritmo observado.
+      ...(monthlyPlan !== undefined && {
+        monthlyPlan: monthlyPlan === null ? null : monthlyPlan.toString(),
+      }),
 
       ...(startDate && { startDate: new Date(startDate) }),
       ...(targetDate && { targetDate: new Date(targetDate) }),

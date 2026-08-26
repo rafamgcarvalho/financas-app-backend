@@ -1,5 +1,6 @@
 import {
   IsEnum,
+  Min,
   IsISO8601,
   IsNotEmpty,
   IsNumber,
@@ -39,4 +40,10 @@ export class CreateGoalsDto {
   @IsEnum(['ESSENTIAL', 'IMPORTANT', 'DESIRABLE'])
   @IsNotEmpty()
   priority: 'ESSENTIAL' | 'IMPORTANT' | 'DESIRABLE';
+
+  /** Aporte mensal pretendido, usado como base da projeção. */
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  monthlyPlan?: number | null;
 }
