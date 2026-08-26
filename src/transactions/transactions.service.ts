@@ -437,29 +437,39 @@ export class TransactionsService {
     return deletedResult;
   }
 
-  /* Balanço */
+  /**
+   * Balanço do período.
+   *
+   * Investimento não é despesa: despesa destrói dinheiro, investimento apenas
+   * muda de lugar. Somando os dois, quem investe o que sobra veria o saldo dar
+   * zero todo mês — um número que é sempre zero não mede nada.
+   *
+   * `total` é receitas menos despesas; `unallocated` é o que sobrou e ainda não
+   * foi guardado.
+   */
   async getBalance(userId: string, month?: number, year?: number) {
     const allTransactions = await this.findAllById(userId, month, year);
 
     const totals = allTransactions.reduce(
       (acc, transaction) => {
         const amount = Number(transaction.amount);
-        if (transaction.type === 'INCOME') acc.income += amount;
 
-        if (
-          transaction.type === 'EXPENSE' ||
-          transaction.type === 'INVESTMENT'
-        ) {
-          acc.expense += amount;
-        }
+        if (transaction.type === 'INCOME') acc.income += amount;
+        else if (transaction.type === 'EXPENSE') acc.expense += amount;
+        else if (transaction.type === 'INVESTMENT') acc.investment += amount;
+
         return acc;
       },
-      { income: 0, expense: 0 },
+      { income: 0, expense: 0, investment: 0 },
     );
+
+    const total = totals.income - totals.expense;
 
     return {
       ...totals,
-      total: totals.income - totals.expense,
+      total,
+      unallocated: total - totals.investment,
+      savingsRate: totals.income > 0 ? totals.investment / totals.income : null,
     };
   }
 
