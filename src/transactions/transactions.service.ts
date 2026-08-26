@@ -8,6 +8,35 @@ import { and, eq, gte, lte, max, min, sql, or, inArray } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { GoalsGateway } from '../goals/goals.gateway';
 
+/**
+ * Avança meses preservando o dia, sem estourar para o mês seguinte.
+ *
+ * `setUTCMonth` resolve 31 de fevereiro como 3 de março, o que fazia uma
+ * recorrência lançada no dia 31 pular fevereiro inteiro e cair duas vezes em
+ * março. Quando o dia não existe no mês de destino, usamos o último dia dele —
+ * é o que bancos e cartões fazem com vencimento em dia 31.
+ */
+export function addMonthsClamped(base: Date, months: number): Date {
+  const targetMonth = base.getUTCMonth() + months;
+
+  // Dia 0 do mês seguinte = último dia do mês de destino.
+  const lastDayOfTarget = new Date(
+    Date.UTC(base.getUTCFullYear(), targetMonth + 1, 0),
+  ).getUTCDate();
+
+  return new Date(
+    Date.UTC(
+      base.getUTCFullYear(),
+      targetMonth,
+      Math.min(base.getUTCDate(), lastDayOfTarget),
+      base.getUTCHours(),
+      base.getUTCMinutes(),
+      base.getUTCSeconds(),
+      base.getUTCMilliseconds(),
+    ),
+  );
+}
+
 type TransactionType = 'INCOME' | 'EXPENSE' | 'INVESTMENT';
 
 const TRANSACTION_TYPES: TransactionType[] = [
@@ -40,9 +69,7 @@ export class TransactionsService {
     const groupId = totalRepetitions > 1 ? randomUUID() : null;
 
     for (let i = 0; i < totalRepetitions; i++) {
-      const currentDate = new Date(baseDate);
-
-      currentDate.setUTCMonth(currentDate.getUTCMonth() + i);
+      const currentDate = addMonthsClamped(baseDate, i);
 
       // Recorrente repete o mesmo valor todo mês; parcelado divide o total.
       const finalAmount = isRecurring
