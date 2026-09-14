@@ -42,6 +42,8 @@ cp .env.example .env
 | `GEMINI_API_KEY` | Chave do [Google AI Studio](https://aistudio.google.com/apikey), usada pelo assistente. Sem ela a API sobe normalmente e só o chat fica indisponível. |
 | `GEMINI_MODEL` | Opcional. Padrão `gemini-2.5-flash`. |
 | `GEMINI_TEMPERATURE` | Opcional. Padrão `0.2`. |
+| `GEMINI_MAX_OUTPUT_TOKENS` | Opcional. Padrão `8192`. Os tokens de raciocínio contam aqui dentro — um teto baixo corta a resposta no meio. |
+| `GEMINI_THINKING_BUDGET` | Opcional. Limita o raciocínio antes da resposta (`0` desliga, `-1` automático). Sem a variável, vale o padrão do modelo. |
 
 O `.env` está no `.gitignore` e a `GEMINI_API_KEY` nunca sai do servidor: o
 frontend não a recebe em nenhuma resposta.
@@ -140,6 +142,27 @@ convicção sobre algo que não existe aqui.
 O histórico da conversa não é persistido no servidor — ele vem do navegador a
 cada requisição. Há um limite de 20 mensagens por usuário a cada 5 minutos,
 mantido em memória (vale por instância).
+
+### Continuidade
+
+Como o bloco de contexto é reenviado inteiro a cada turno, o modelo lia toda
+mensagem como o começo de uma sessão nova e abria as respostas com "Olá!". O
+envelope agora carrega um `<estado_da_conversa>` com o número da mensagem e um
+`primeira_mensagem`, e o system prompt tem uma seção de CONTINUIDADE que proíbe
+cumprimentar de novo. É determinístico: não depende de o modelo inferir o tom
+pelo histórico.
+
+### Memória entre chats
+
+O frontend mantém conversas separadas. Cada pergunta leva, além do histórico do
+chat atual, um resumo dos outros: `otherConversations`, com o título e as
+**perguntas** feitas em cada um.
+
+Só as perguntas, nunca as respostas antigas do modelo. A pergunta carrega a
+intenção e os fatos que o usuário declarou ("meu salário vai aumentar para
+3000"); uma resposta antiga carregaria números que podem já estar desatualizados,
+e número velho ao lado do atual é convite para o assistente citar o errado. O
+bloco vai marcado como texto do usuário, não como dado do sistema.
 
 ---
 

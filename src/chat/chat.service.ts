@@ -9,7 +9,11 @@ import { FinanceContextService } from './finance-context.service';
 import { GeminiService } from './gemini.service';
 import { ChatRequestDto } from './dto/chat-request.dto';
 import { looksLikeInjection, sanitizeUserMessage } from './sanitize';
-import { buildUserTurn, FINBOT_SYSTEM_PROMPT } from './system-prompt';
+import {
+  buildUserTurn,
+  FINBOT_SYSTEM_PROMPT,
+  type OtherConversation,
+} from './system-prompt';
 import { SlidingWindowRateLimiter } from './rate-limiter';
 
 /**
@@ -23,13 +27,20 @@ import { SlidingWindowRateLimiter } from './rate-limiter';
 const RATE_LIMIT_MESSAGES = 20;
 const RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
 
-/** Quantos turnos do histórico seguem para o modelo (10 pares pergunta/resposta). */
-const MAX_HISTORY_TURNS = 20;
+/**
+ * Quantos turnos do histórico seguem para o modelo (20 pares pergunta/resposta).
+ *
+ * Cortar curto demais era parte do problema relatado: o assistente perdia o que
+ * tinha sido combinado no começo da conversa e voltava a se apresentar.
+ */
+const MAX_HISTORY_TURNS = 40;
 
 export type ChatReply = {
   answer: string;
   model: string;
   generatedAt: string;
+  /** True quando o modelo bateu no teto de tokens e a resposta ficou pela metade. */
+  truncated: boolean;
 };
 
 @Injectable()
@@ -60,20 +71,31 @@ export class ChatService {
     this.enforceRateLimit(userId);
 
     const snapshot = await this.financeContext.buildFor(userId);
+    const history = this.buildHistory(dto.history);
 
-    const answer = await this.gemini.generate({
+    const result = await this.gemini.generate({
       systemInstruction: FINBOT_SYSTEM_PROMPT,
       contents: [
-        ...this.buildHistory(dto.history),
+        ...history,
         {
           role: 'user',
           parts: [
             {
-              text: buildUserTurn(
+              text: buildUserTurn({
                 snapshot,
-                message,
-                looksLikeInjection(message),
-              ),
+                question: message,
+                suspicious: looksLikeInjection(message),
+                state: {
+                  // Conta só os turnos do usuário: é o número da pergunta, não
+                  // o de linhas trocadas.
+                  messageNumber:
+                    history.filter((turn) => turn.role === 'user').length + 1,
+                  isFirstMessage: history.length === 0,
+                },
+                otherConversations: this.buildOtherConversations(
+                  dto.otherConversations,
+                ),
+              }),
             },
           ],
         },
@@ -81,9 +103,10 @@ export class ChatService {
     });
 
     return {
-      answer,
+      answer: result.text,
       model: this.gemini.model,
       generatedAt: new Date().toISOString(),
+      truncated: result.truncated,
     };
   }
 
@@ -120,5 +143,24 @@ export class ChatService {
         parts: [{ text: sanitizeUserMessage(turn.content) }],
       }))
       .filter((turn) => turn.parts[0].text.length > 0);
+  }
+
+  /** Resumo dos outros chats, higienizado e sem entradas vazias. */
+  private buildOtherConversations(
+    conversations: ChatRequestDto['otherConversations'],
+  ): OtherConversation[] {
+    if (!conversations?.length) return [];
+
+    return conversations
+      .map((conversation) => ({
+        title: sanitizeUserMessage(conversation.title),
+        questions: conversation.questions
+          .map((question) => sanitizeUserMessage(question))
+          .filter((question) => question.length > 0),
+      }))
+      .filter(
+        (conversation) =>
+          conversation.title.length > 0 && conversation.questions.length > 0,
+      );
   }
 }
