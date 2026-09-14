@@ -39,6 +39,12 @@ cp .env.example .env
 | `DATABASE_URL` | Conexão com o Postgres. O SSL liga sozinho quando o host não é local. |
 | `JWT_SECRET` | Assina os tokens. Use um valor longo e aleatório em produção. |
 | `PORT` | Porta da API (padrão 3001). |
+| `GEMINI_API_KEY` | Chave do [Google AI Studio](https://aistudio.google.com/apikey), usada pelo assistente. Sem ela a API sobe normalmente e só o chat fica indisponível. |
+| `GEMINI_MODEL` | Opcional. Padrão `gemini-2.5-flash`. |
+| `GEMINI_TEMPERATURE` | Opcional. Padrão `0.2`. |
+
+O `.env` está no `.gitignore` e a `GEMINI_API_KEY` nunca sai do servidor: o
+frontend não a recebe em nenhuma resposta.
 
 ### 3. Migrações e execução
 
@@ -97,8 +103,43 @@ seguinte.
 | `GET` | `/transactions/stats/comparison` | Totais do mês por tipo |
 | `GET` | `/transactions/stats/categories` | Gasto por categoria (chave crua) |
 | `GET` | `/goals` … | Metas e membros |
+| `GET` | `/chat/status` | Diz se o assistente está configurado |
+| `POST` | `/chat` | Pergunta ao assistente. Corpo: `message` e `history` |
 
 As categorias são texto livre: quem define rótulo, ícone e cor é o frontend.
+
+## Assistente financeiro (`/chat`)
+
+Um consultor conversacional sobre os próprios dados do usuário, servido pelo
+Gemini. O código vive em `src/chat/`.
+
+O fluxo de cada mensagem:
+
+1. `AuthGuard` valida o token e o `user_id` sai do `sub` do JWT. O DTO **não tem**
+   campo de usuário e o `ValidationPipe` global roda com `forbidNonWhitelisted`,
+   então mandar `userId` no corpo devolve 400 — não há caminho para um IDOR.
+2. `FinanceContextService` lê do banco só o que pertence àquele id e monta a foto
+   financeira: saldo, médias dos últimos 6 meses fechados, histórico de 12 meses,
+   receitas recorrentes, despesas fixas, parcelamentos em aberto, aportes e metas
+   com projeção.
+3. `Anonymizer` (`sanitize.ts`) higieniza o que é texto livre antes de sair:
+   e-mail, CPF/CNPJ, telefone e sequências longas de dígitos são mascarados, o
+   nome do próprio usuário é riscado, nomes de bancos viram "Instituição A" e
+   participantes de metas compartilhadas viram "Participante 1". Nenhum `id`,
+   nome ou username é enviado.
+4. `GeminiService` chama o modelo com `temperature: 0.2` e o system prompt de
+   `system-prompt.ts`. O contexto vai delimitado em `<contexto_financeiro>` e a
+   pergunta em `<pergunta_do_usuario>` — título de lançamento é texto que o
+   usuário escreveu, e sem a separação ele chegaria ao modelo parecendo ordem.
+
+O payload leva junto uma lista de `limitacoesDoContexto`: o que o schema **não**
+tem (cartão de crédito, fatura, rentabilidade, tipo de ativo). Sem ela o modelo
+preenche a lacuna com o que costuma existir num app de finanças e responde com
+convicção sobre algo que não existe aqui.
+
+O histórico da conversa não é persistido no servidor — ele vem do navegador a
+cada requisição. Há um limite de 20 mensagens por usuário a cada 5 minutos,
+mantido em memória (vale por instância).
 
 ---
 

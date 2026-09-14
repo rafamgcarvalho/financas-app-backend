@@ -3,8 +3,15 @@ import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { GoalsModule } from './goals/goals.module';
+import { ChatModule } from './chat/chat.module';
 
 @Module({
-  imports: [UsersModule, AuthModule, TransactionsModule, GoalsModule],
+  imports: [
+    UsersModule,
+    AuthModule,
+    TransactionsModule,
+    GoalsModule,
+    ChatModule,
+  ],
 })
 export class AppModule {}
