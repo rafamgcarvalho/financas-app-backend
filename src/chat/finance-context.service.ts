@@ -7,6 +7,7 @@ import {
   buildSnapshot,
   HISTORY_MONTHS,
   type FinanceSnapshot,
+  type GoalMovement,
   type GoalRow,
   type TransactionRow,
 } from './finance-snapshot';
@@ -103,7 +104,12 @@ export class FinanceContextService {
       .where(and(eq(transactions.userId, userId), lte(transactions.date, now)))
       .groupBy(transactions.type);
 
-    const totals = { receitas: 0, despesas: 0, investimentos: 0 };
+    const totals = {
+      receitas: 0,
+      despesas: 0,
+      investimentos: 0,
+      resgates: 0,
+    };
 
     for (const row of rows) {
       const value = Number(row.total) || 0;
@@ -111,6 +117,7 @@ export class FinanceContextService {
       if (row.type === 'INCOME') totals.receitas = value;
       else if (row.type === 'EXPENSE') totals.despesas = value;
       else if (row.type === 'INVESTMENT') totals.investimentos = value;
+      else if (row.type === 'WITHDRAWAL') totals.resgates = value;
     }
 
     return totals;
@@ -163,14 +170,14 @@ export class FinanceContextService {
   }
 
   /**
-   * Aportes por meta, de todos os participantes.
+   * Aportes e resgates por meta, de todos os participantes.
    *
    * Não é vazamento: `currentValue` da meta já soma o que todo mundo guardou, e
    * a tela da meta mostra esse histórico para qualquer membro. O que fica de
    * fora é a identidade — quem aportou vira "Participante N".
    */
   private async findGoalContributions(goalIds: string[]) {
-    const byGoal = new Map<string, { date: Date; amount: string }[]>();
+    const byGoal = new Map<string, GoalMovement[]>();
 
     if (goalIds.length === 0) return byGoal;
 
@@ -179,12 +186,15 @@ export class FinanceContextService {
         goalId: transactions.goalId,
         date: transactions.date,
         amount: transactions.amount,
+        type: transactions.type,
       })
       .from(transactions)
       .where(
         and(
           inArray(transactions.goalId, goalIds),
-          eq(transactions.type, 'INVESTMENT'),
+          // O resgate entra junto: sem ele o ritmo da meta mostraria só o que
+          // entrou e ignoraria o que saiu.
+          inArray(transactions.type, ['INVESTMENT', 'WITHDRAWAL']),
         ),
       );
 
@@ -192,7 +202,7 @@ export class FinanceContextService {
       if (!row.goalId) continue;
 
       const list = byGoal.get(row.goalId) ?? [];
-      list.push({ date: row.date, amount: row.amount });
+      list.push({ date: row.date, amount: row.amount, type: row.type });
       byGoal.set(row.goalId, list);
     }
 

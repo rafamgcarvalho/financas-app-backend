@@ -78,7 +78,28 @@ describe('buildMonthlyHistory', () => {
       (month) => month.mes === '2026-08',
     );
 
-    expect(august).toMatchObject({ saldo: 2000, naoAlocado: 1200 });
+    // O mês produziu 2.000, mas só 1.200 sobraram em caixa.
+    expect(august).toMatchObject({ resultado: 2000, variacaoDoCaixa: 1200 });
+  });
+
+  it('o resgate devolve caixa sem virar receita', () => {
+    const rows = [
+      tx({ date: '2026-08-05', type: 'INCOME', amount: '5000' }),
+      tx({ date: '2026-08-06', type: 'EXPENSE', amount: '3000' }),
+      tx({ date: '2026-08-07', type: 'INVESTMENT', amount: '800' }),
+      tx({ date: '2026-08-20', type: 'WITHDRAWAL', amount: '300' }),
+    ];
+
+    const august = buildMonthlyHistory(rows, NOW).find(
+      (month) => month.mes === '2026-08',
+    );
+
+    expect(august).toMatchObject({
+      receitas: 5000,
+      resgates: 300,
+      resultado: 2000,
+      variacaoDoCaixa: 1500,
+    });
   });
 });
 
@@ -165,14 +186,26 @@ describe('buildRecurring', () => {
 });
 
 describe('observedGoalPace', () => {
+  const aporte = (date: string, amount: string) => ({
+    date: new Date(`${date}T12:00:00Z`),
+    amount,
+    type: 'INVESTMENT',
+  });
+
+  const resgate = (date: string, amount: string) => ({
+    date: new Date(`${date}T12:00:00Z`),
+    amount,
+    type: 'WITHDRAWAL',
+  });
+
   it('usa a mediana, para um aporte atípico não inflar o ritmo', () => {
     const contributions = [
-      { date: new Date('2026-04-10T12:00:00Z'), amount: '900' },
-      { date: new Date('2026-05-10T12:00:00Z'), amount: '900' },
-      { date: new Date('2026-06-10T12:00:00Z'), amount: '900' },
-      { date: new Date('2026-07-10T12:00:00Z'), amount: '5000' },
-      { date: new Date('2026-08-10T12:00:00Z'), amount: '900' },
-      { date: new Date('2026-09-05T12:00:00Z'), amount: '900' },
+      aporte('2026-04-10', '900'),
+      aporte('2026-05-10', '900'),
+      aporte('2026-06-10', '900'),
+      aporte('2026-07-10', '5000'),
+      aporte('2026-08-10', '900'),
+      aporte('2026-09-05', '900'),
     ];
 
     expect(observedGoalPace(contributions, NOW).ritmo).toBe(900);
@@ -180,12 +213,28 @@ describe('observedGoalPace', () => {
 
   it('conta mês sem aporte como zero', () => {
     const contributions = [
-      { date: new Date('2026-04-10T12:00:00Z'), amount: '600' },
-      { date: new Date('2026-09-05T12:00:00Z'), amount: '600' },
+      aporte('2026-04-10', '600'),
+      aporte('2026-09-05', '600'),
     ];
 
     // Janela de abril a setembro: 600, 0, 0, 0, 0, 600 -> mediana zero.
     expect(observedGoalPace(contributions, NOW).ritmo).toBe(0);
+  });
+
+  it('desconta o resgate: um mês que aportou e sacou o mesmo não andou', () => {
+    const movements = [
+      aporte('2026-04-10', '500'),
+      aporte('2026-05-10', '500'),
+      aporte('2026-06-10', '500'),
+      // Julho aportou 500 e sacou 500: ritmo zero naquele mês.
+      aporte('2026-07-10', '500'),
+      resgate('2026-07-20', '500'),
+      aporte('2026-08-10', '500'),
+      aporte('2026-09-05', '500'),
+    ];
+
+    // Janela de abril a setembro: 500, 500, 500, 0, 500, 500 -> mediana 500.
+    expect(observedGoalPace(movements, NOW).ritmo).toBe(500);
   });
 
   it('não projeta ritmo sem histórico', () => {
@@ -217,20 +266,46 @@ describe('buildSnapshot', () => {
         tx({ date: '2026-08-06', type: 'EXPENSE', amount: '4000' }),
         tx({ date: '2026-08-07', type: 'INVESTMENT', amount: '750' }),
       ],
-      lifetimeTotals: { receitas: 60000, despesas: 40000, investimentos: 8000 },
+      lifetimeTotals: {
+        receitas: 60000,
+        despesas: 40000,
+        investimentos: 8000,
+        resgates: 1000,
+      },
       goalRows: [goal],
       contributionsByGoal: new Map([
-        ['goal-1', [{ date: new Date('2026-08-07T12:00:00Z'), amount: '750' }]],
+        [
+          'goal-1',
+          [
+            {
+              date: new Date('2026-08-07T12:00:00Z'),
+              amount: '750',
+              type: 'INVESTMENT',
+            },
+          ],
+        ],
       ]),
       now: NOW,
       anonymizer: new Anonymizer({ name: 'Rafael', username: 'rafa' }),
     });
 
-  it('não soma o investido duas vezes no patrimônio', () => {
-    const { resumoGeral } = snapshot();
+  it('separa caixa de patrimônio sem contar o investido duas vezes', () => {
+    const { patrimonio } = snapshot();
 
-    expect(resumoGeral.saldoAcumulado).toBe(20000);
-    expect(resumoGeral.naoAlocado).toBe(12000);
+    // 60.000 − 40.000 − 8.000 + 1.000
+    expect(patrimonio.caixaDisponivel).toBe(13000);
+    // 8.000 aportados − 1.000 resgatados
+    expect(patrimonio.totalInvestido).toBe(7000);
+    // Aporte e resgate só movem dinheiro: 60.000 − 40.000.
+    expect(patrimonio.total).toBe(20000);
+  });
+
+  it('preserva o histórico de aportes ao lado da posição atual', () => {
+    const { investimentos } = snapshot();
+
+    expect(investimentos.totalAportadoHistorico).toBe(8000);
+    expect(investimentos.totalResgatado).toBe(1000);
+    expect(investimentos.valorInvestidoAtual).toBe(7000);
   });
 
   it('anonimiza o título da meta e os participantes', () => {

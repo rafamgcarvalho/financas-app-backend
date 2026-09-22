@@ -1,12 +1,21 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { db } from '../db/drizzle';
 import { goals, transactions, goalMembers, users } from '../db/schema';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
 import { and, eq, gte, lte, max, min, sql, or, inArray } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { GoalsGateway } from '../goals/goals.gateway';
+import {
+  cashFlowOf,
+  goalValueOf,
+  normalizeFinanceType,
+  positionOf,
+  savingsRateOf,
+  sumByType,
+  type FinanceType,
+} from '../finance/finance-math';
 
 /**
  * Avança meses preservando o dia, sem estourar para o mês seguinte.
@@ -37,20 +46,32 @@ export function addMonthsClamped(base: Date, months: number): Date {
   );
 }
 
-type TransactionType = 'INCOME' | 'EXPENSE' | 'INVESTMENT';
+type TransactionType = FinanceType;
 
-const TRANSACTION_TYPES: TransactionType[] = [
-  'INCOME',
-  'EXPENSE',
-  'INVESTMENT',
-];
+/**
+ * Tipos do filtro, aceitando "expense", "EXPENSE" e listas como
+ * "INVESTMENT,WITHDRAWAL". Qualquer coisa fora do enum é ignorada.
+ *
+ * A tela de investimentos precisa dos dois numa consulta só: são as duas faces
+ * do mesmo histórico, e pedir separado devolveria duas listas para o navegador
+ * intercalar por data.
+ */
+function normalizeTransactionTypes(type?: string): TransactionType[] {
+  if (!type || type === 'all') return [];
 
-/** Aceita "expense", "EXPENSE"... e ignora qualquer coisa fora do enum. */
-function normalizeTransactionType(type?: string): TransactionType | undefined {
-  if (!type || type === 'all') return undefined;
+  return [
+    ...new Set(
+      type
+        .split(',')
+        .map((part) => normalizeFinanceType(part.trim()))
+        .filter((value): value is TransactionType => Boolean(value)),
+    ),
+  ];
+}
 
-  const upper = type.toUpperCase() as TransactionType;
-  return TRANSACTION_TYPES.includes(upper) ? upper : undefined;
+/** Aporte e resgate são os tipos que movimentam o saldo de uma meta. */
+function movesGoal(type: string): boolean {
+  return type === 'INVESTMENT' || type === 'WITHDRAWAL';
 }
 
 /**
@@ -132,56 +153,114 @@ export class TransactionsService {
       });
     }
 
+    // O resgate sai de algum lugar: sacar mais do que a meta tem produziria um
+    // saldo negativo que nenhuma tela sabe explicar. Barrar na entrada é mais
+    // barato do que descobrir depois, olhando um card com valor impossível.
+    if (dto.type === 'WITHDRAWAL' && dto.goalId) {
+      const requested =
+        Number(dto.amount) * (isRecurring ? totalRepetitions : 1);
+      await this.assertWithdrawalFits(dto.goalId, requested);
+    }
+
     const result = await db
       .insert(transactions)
       .values(transactionsToInsert)
       .returning();
 
-    // REGRA DE NEGÓCIO: Se for investimento vinculado a uma meta, atualiza a meta
-    if (dto.type === 'INVESTMENT' && dto.goalId) {
-      const selectedGoalId: string = dto.goalId;
-      const totalAportado = Number(dto.amount) * (isRecurring ? 12 : 1);
-
-      await db
-        .update(goals)
-        .set({
-          currentValue: sql`${goals.currentValue} + ${totalAportado.toFixed(2)}`,
-        })
-        .where(eq(goals.id, selectedGoalId));
-
-      const [updatedGoal] = await db
-        .select()
-        .from(goals)
-        .where(eq(goals.id, selectedGoalId));
-
-      if (updatedGoal) {
-        const current = Number(updatedGoal.currentValue);
-        const target = Number(updatedGoal.targetValue);
-
-        if (current >= target && updatedGoal.status !== 'COMPLETED') {
-          await db
-            .update(goals)
-            .set({ status: 'COMPLETED' })
-            .where(eq(goals.id, selectedGoalId));
-        }
-      }
-
-      // Busca o nome do usuário para notificar via WebSocket
-      const [user] = await db
-        .select({ name: users.name })
-        .from(users)
-        .where(eq(users.id, userId));
-
-      this.goalsGateway.notifyGoalUpdated({
-        goalId: selectedGoalId,
-        currentValue: updatedGoal?.currentValue || '0',
-        userName: user?.name || 'Alguém',
-        amount: Number(dto.amount),
-        action: 'created',
-      });
+    // Aporte e resgate mexem no saldo da meta — o valor é recalculado a partir
+    // das transações, nunca somado em cima do que estava lá.
+    if (movesGoal(dto.type) && dto.goalId) {
+      await this.syncGoal(dto.goalId, userId, Number(dto.amount), 'created');
     }
 
     return result;
+  }
+
+  /**
+   * Recalcula o valor de uma meta a partir das transações vinculadas a ela.
+   *
+   * Aportes menos resgates, lido do banco a cada vez. É mais uma consulta do
+   * que somar um delta no lugar, mas é a única forma de editar, apagar ou
+   * remanejar um lançamento sem chance de deixar resíduo — que era exatamente
+   * o defeito da aritmética incremental anterior.
+   */
+  private async recalcGoalValue(goalId: string) {
+    const rows = await db
+      .select({
+        type: transactions.type,
+        total: sql<string>`COALESCE(SUM(${transactions.amount}), 0)`,
+      })
+      .from(transactions)
+      .where(eq(transactions.goalId, goalId))
+      .groupBy(transactions.type);
+
+    const current = goalValueOf(
+      sumByType(rows.map((row) => ({ ...row, amount: row.total }))),
+    );
+
+    const [goal] = await db.select().from(goals).where(eq(goals.id, goalId));
+    if (!goal) return null;
+
+    const target = Number(goal.targetValue);
+
+    // PAUSED é uma escolha do usuário e sobrevive ao recálculo: só a dupla
+    // ATIVA/CONCLUÍDA é derivada do valor. Antes, excluir um aporte reativava
+    // uma meta pausada sem que ninguém tivesse pedido.
+    const status =
+      target > 0 && current >= target
+        ? 'COMPLETED'
+        : goal.status === 'COMPLETED'
+          ? 'ACTIVE'
+          : goal.status;
+
+    const [updated] = await db
+      .update(goals)
+      .set({ currentValue: current.toFixed(2), status, updatedAt: new Date() })
+      .where(eq(goals.id, goalId))
+      .returning();
+
+    return updated ?? null;
+  }
+
+  /** Recalcula a meta e avisa os participantes conectados. */
+  private async syncGoal(
+    goalId: string,
+    userId: string,
+    amount: number,
+    action: 'created' | 'updated' | 'deleted',
+  ) {
+    const goal = await this.recalcGoalValue(goalId);
+
+    const [user] = await db
+      .select({ name: users.name })
+      .from(users)
+      .where(eq(users.id, userId));
+
+    this.goalsGateway.notifyGoalUpdated({
+      goalId,
+      currentValue: goal?.currentValue ?? '0',
+      userName: user?.name || 'Alguém',
+      amount,
+      action,
+    });
+  }
+
+  /** @throws BadRequestException quando o resgate excede o saldo da meta. */
+  private async assertWithdrawalFits(goalId: string, amount: number) {
+    const [goal] = await db
+      .select({ title: goals.title, currentValue: goals.currentValue })
+      .from(goals)
+      .where(eq(goals.id, goalId));
+
+    if (!goal) return;
+
+    const available = Number(goal.currentValue) || 0;
+
+    if (amount > available) {
+      throw new BadRequestException(
+        `A meta "${goal.title}" tem R$ ${available.toFixed(2)} investidos — não é possível resgatar R$ ${amount.toFixed(2)}.`,
+      );
+    }
   }
 
   /* Encontrar transações */
@@ -207,10 +286,13 @@ export class TransactionsService {
     const conditions = [eq(transactions.userId, userId)];
 
     // As telas de Receitas e Despesas pedem um tipo só; sem este filtro elas
-    // baixavam o mês inteiro e descartavam o resto no navegador.
-    const normalizedType = normalizeTransactionType(type);
-    if (normalizedType) {
-      conditions.push(eq(transactions.type, normalizedType));
+    // baixavam o mês inteiro e descartavam o resto no navegador. A de
+    // Investimentos pede dois, separados por vírgula.
+    const types = normalizeTransactionTypes(type);
+    if (types.length === 1) {
+      conditions.push(eq(transactions.type, types[0]));
+    } else if (types.length > 1) {
+      conditions.push(inArray(transactions.type, types));
     }
 
     const fromDate = parseDayBoundary(from, 'start');
@@ -306,12 +388,21 @@ export class TransactionsService {
 
     if (!original) return null;
 
+    // Remanejar um aporte de uma meta para outra é uma operação legítima; o
+    // que não pode é a meta antiga ficar com o valor do lançamento que saiu.
+    // As duas são recalculadas no fim.
+    const goalChanged =
+      movesGoal(original.type) &&
+      dto.goalId !== undefined &&
+      dto.goalId !== original.goalId;
+
     const updateData: any = {
       title: dto.title,
       amount: dto.amount?.toString(),
       description: dto.description,
       category: dto.category,
       date: dto.date ? new Date(dto.date) : undefined,
+      goalId: goalChanged ? dto.goalId : undefined,
     };
 
     const filteredUpdateData = Object.entries(updateData).reduce(
@@ -332,19 +423,6 @@ export class TransactionsService {
         )
       : undefined;
 
-    const totalRecords = appliesToGroup
-      ? await db
-          .select({ count: sql`COUNT(*)::int` })
-          .from(transactions)
-          .where(groupCondition)
-          .then((result) => Number(result[0]?.count || 0))
-      : 1;
-
-    const originalAmount = Number(original.amount);
-    // Quando a edição vale só para esta linha, o efeito na meta é o dela apenas.
-    const affectedRecords = appliesToGroup ? totalRecords : 1;
-    const originalTotalAmount = originalAmount * affectedRecords;
-
     const dataWithoutDate = (({ date, ...rest }) => rest)(filteredUpdateData);
 
     const [updated] = appliesToGroup
@@ -359,56 +437,21 @@ export class TransactionsService {
           .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
           .returning();
 
-    if (original.type === 'INVESTMENT' && original.goalId) {
+    if (movesGoal(original.type)) {
       const updatedAmount =
-        dto.amount !== undefined ? Number(dto.amount) : originalAmount;
-      const updatedTotalAmount = updatedAmount * affectedRecords;
-      const diff = updatedTotalAmount - originalTotalAmount;
+        dto.amount !== undefined ? Number(dto.amount) : Number(original.amount);
 
-      if (diff !== 0) {
-        await db
-          .update(goals)
-          .set({
-            currentValue: sql`${goals.currentValue} + ${diff.toFixed(2)}`,
-          })
-          .where(eq(goals.id, original.goalId));
+      // A meta de origem entra na lista mesmo quando o lançamento mudou de
+      // meta: é ela que precisa devolver o valor que saiu.
+      const affectedGoals = new Set(
+        [original.goalId, goalChanged ? dto.goalId : null].filter(
+          (goalId): goalId is string => Boolean(goalId),
+        ),
+      );
+
+      for (const goalId of affectedGoals) {
+        await this.syncGoal(goalId, userId, updatedAmount, 'updated');
       }
-
-      const [goal] = await db
-        .select()
-        .from(goals)
-        .where(eq(goals.id, original.goalId));
-
-      if (goal) {
-        const current = Number(goal.currentValue);
-        const target = Number(goal.targetValue);
-
-        if (current >= target && goal.status !== 'COMPLETED') {
-          await db
-            .update(goals)
-            .set({ status: 'COMPLETED' })
-            .where(eq(goals.id, original.goalId));
-        } else if (current < target && goal.status === 'COMPLETED') {
-          await db
-            .update(goals)
-            .set({ status: 'ACTIVE' })
-            .where(eq(goals.id, original.goalId));
-        }
-      }
-
-      // Notifica via WebSocket
-      const [user] = await db
-        .select({ name: users.name })
-        .from(users)
-        .where(eq(users.id, userId));
-
-      this.goalsGateway.notifyGoalUpdated({
-        goalId: original.goalId,
-        currentValue: goal?.currentValue || '0',
-        userName: user?.name || 'Alguém',
-        amount: updatedAmount,
-        action: 'updated',
-      });
     }
 
     return updated;
@@ -446,88 +489,101 @@ export class TransactionsService {
     }
 
     // 2. REGRA DE ESTORNO
-    if (transaction.type === 'INVESTMENT' && transaction.goalId) {
-      const amountToSubtract = Number(transaction.amount);
-
-      // Agora o TS sabe que deletedResult é um array, acabando com o erro de unsafe member access
-      const totalEffect =
-        (transaction.isRecurring || deleteAll) && transaction.groupId
-          ? amountToSubtract * deletedResult.length
-          : amountToSubtract;
-
-      await db
-        .update(goals)
-        .set({
-          currentValue: sql`${goals.currentValue} - ${totalEffect.toFixed(2)}`,
-          status: 'ACTIVE',
-        })
-        .where(eq(goals.id, transaction.goalId));
-
-      // Busca meta atualizada e notifica via WebSocket
-      const [updatedGoal] = await db
-        .select()
-        .from(goals)
-        .where(eq(goals.id, transaction.goalId));
-
-      const [user] = await db
-        .select({ name: users.name })
-        .from(users)
-        .where(eq(users.id, userId));
-
-      this.goalsGateway.notifyGoalUpdated({
-        goalId: transaction.goalId,
-        currentValue: updatedGoal?.currentValue || '0',
-        userName: user?.name || 'Alguém',
-        amount: totalEffect,
-        action: 'deleted',
-      });
+    // O recálculo já enxerga as linhas que sobraram, então não importa quantas
+    // foram apagadas — não há delta para acertar nem risco de subtrair a mais.
+    if (movesGoal(transaction.type) && transaction.goalId) {
+      const removed = Number(transaction.amount) * deletedResult.length;
+      await this.syncGoal(transaction.goalId, userId, removed, 'deleted');
     }
 
     return deletedResult;
   }
 
   /**
-   * Balanço do período.
+   * Balanço do período, nos dois eixos que o app precisa distinguir.
    *
-   * Investimento não é despesa: despesa destrói dinheiro, investimento apenas
-   * muda de lugar. Somando os dois, quem investe o que sobra veria o saldo dar
-   * zero todo mês — um número que é sempre zero não mede nada.
+   * `cashFlow` é movimento: o que entrou e saiu no período, com aporte e
+   * resgate em linhas próprias — investimento não vira despesa só para a conta
+   * fechar, e resgate não vira receita.
    *
-   * `total` é receitas menos despesas; `unallocated` é o que sobrou e ainda não
-   * foi guardado.
+   * `position` é estoque: quanto existe acumulado até o fim do período. É de
+   * onde saem caixa disponível, valor investido e patrimônio. Somar totais de
+   * um mês não daria posição nenhuma, então ela vem de uma consulta própria
+   * sobre todo o histórico até aquela data.
+   *
+   * Os campos soltos do topo (`income`, `total`, `unallocated`...) existiam
+   * antes desta mudança e continuam respondendo o mesmo que sempre
+   * responderam — `unallocated` agora desconta também os resgates, porque a
+   * fórmula antiga ignorava que eles devolvem dinheiro ao caixa.
    */
   async getBalance(userId: string, month?: number, year?: number) {
-    const allTransactions = await this.findAllById(userId, month, year);
+    const period = this.periodBounds(month, year);
 
-    const totals = allTransactions.reduce(
-      (acc, transaction) => {
-        const amount = Number(transaction.amount);
+    const [periodRows, accumulatedRows] = await Promise.all([
+      this.findAllById(userId, month, year),
+      this.totalsUpTo(userId, period?.end),
+    ]);
 
-        if (transaction.type === 'INCOME') acc.income += amount;
-        else if (transaction.type === 'EXPENSE') acc.expense += amount;
-        else if (transaction.type === 'INVESTMENT') acc.investment += amount;
-
-        return acc;
-      },
-      { income: 0, expense: 0, investment: 0 },
-    );
-
-    const total = totals.income - totals.expense;
+    const totals = sumByType(periodRows);
+    const cashFlow = cashFlowOf(totals);
+    const position = positionOf(accumulatedRows);
 
     return {
-      ...totals,
-      total,
-      unallocated: total - totals.investment,
-      savingsRate: totals.income > 0 ? totals.investment / totals.income : null,
+      income: cashFlow.income,
+      expense: cashFlow.expense,
+      investment: cashFlow.contributions,
+      withdrawal: cashFlow.withdrawals,
+      total: cashFlow.result,
+      unallocated: cashFlow.net,
+      savingsRate: savingsRateOf(totals),
+
+      cashFlow,
+      position,
     };
+  }
+
+  /** Primeiro e último instante do mês; null quando não há período pedido. */
+  private periodBounds(month?: number, year?: number) {
+    if (month === undefined || year === undefined) return null;
+
+    return {
+      start: new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0)),
+      end: new Date(Date.UTC(year, month, 0, 23, 59, 59, 999)),
+    };
+  }
+
+  /**
+   * Totais por tipo de todo o histórico até `until`, somados no banco.
+   *
+   * Recortar por data é o que permite ao dashboard mostrar a posição de um mês
+   * passado — navegar até março devolve o caixa que existia no fim de março, e
+   * não o de hoje. Sem `until`, é a posição considerando tudo o que está
+   * lançado, inclusive parcelas ainda por vencer.
+   */
+  private async totalsUpTo(userId: string, until?: Date) {
+    const conditions = [eq(transactions.userId, userId)];
+    if (until) conditions.push(lte(transactions.date, until));
+
+    const rows = await db
+      .select({
+        type: transactions.type,
+        total: sql<string>`COALESCE(SUM(${transactions.amount}), 0)`,
+      })
+      .from(transactions)
+      .where(and(...conditions))
+      .groupBy(transactions.type);
+
+    return sumByType(rows.map((row) => ({ ...row, amount: row.total })));
   }
 
   async getTransactionRange(userId: string, type?: string) {
     const whereConditions = [eq(transactions.userId, userId)];
 
-    const normalizedType = normalizeTransactionType(type);
-    if (normalizedType) {
-      whereConditions.push(eq(transactions.type, normalizedType));
+    const types = normalizeTransactionTypes(type);
+    if (types.length === 1) {
+      whereConditions.push(eq(transactions.type, types[0]));
+    } else if (types.length > 1) {
+      whereConditions.push(inArray(transactions.type, types));
     }
 
     const [first] = await db
@@ -611,27 +667,23 @@ export class TransactionsService {
   }
 
   async getMonthlyComparison(userId: string, month: number, year: number) {
-    const transactions = await this.findAllById(userId, month, year);
-
-    const stats = {
-      income: 0,
-      expense: 0,
-      investment: 0,
-    };
-
-    transactions.forEach((t) => {
-      const amount = Number(t.amount);
-      if (t.type === 'INCOME') stats.income += amount;
-      else if (t.type === 'EXPENSE') stats.expense += amount;
-      else if (t.type === 'INVESTMENT') stats.investment += amount;
-    });
+    const rows = await this.findAllById(userId, month, year);
+    const totals = sumByType(rows);
 
     // As cores ficam por conta do frontend, que tem a paleta por tipo.
-    return [
-      { name: 'Receitas', valor: stats.income },
-      { name: 'Despesas', valor: stats.expense },
-      { name: 'Investimentos', valor: stats.investment },
+    const comparison = [
+      { name: 'Receitas', valor: totals.income },
+      { name: 'Despesas', valor: totals.expense },
+      { name: 'Aportes', valor: totals.contributions },
     ];
+
+    // A quarta barra só aparece quando houve resgate: numa conta que nunca
+    // resgata, uma coluna zerada fixa ocuparia espaço sem dizer nada.
+    if (totals.withdrawals > 0) {
+      comparison.push({ name: 'Resgates', valor: totals.withdrawals });
+    }
+
+    return comparison;
   }
 
   /**

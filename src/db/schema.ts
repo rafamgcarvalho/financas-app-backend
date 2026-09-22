@@ -13,11 +13,17 @@ import {
 
 /**
  * Tipo da transação
+ *
+ * INVESTMENT (aporte) e WITHDRAWAL (resgate) movem dinheiro entre o caixa e o
+ * que está investido: reduzem e devolvem caixa, respectivamente, sem serem
+ * despesa nem receita. Quem traduz cada tipo em efeito sobre caixa, investido e
+ * patrimônio é `src/finance/finance-math.ts`.
  */
 export const transactionTypeEnum = pgEnum('transaction_type', [
   'INCOME',
   'EXPENSE',
   'INVESTMENT',
+  'WITHDRAWAL',
 ]);
 
 /**
@@ -70,6 +76,15 @@ export const goals = pgTable('goals', {
   description: varchar('description', { length: 100 }),
 
   targetValue: numeric('targetValue').notNull(),
+
+  /**
+   * Aportes menos resgates vinculados a esta meta.
+   *
+   * É denormalizado por conveniência de leitura (card, lista, WebSocket), mas
+   * nunca é somado em incrementos: toda escrita passa por um recálculo completo
+   * a partir das transações da meta, que são a fonte da verdade. Editar, apagar
+   * ou remanejar um lançamento então não tem como deixar resíduo aqui.
+   */
   currentValue: numeric('currentValue').default('0'),
 
   /**

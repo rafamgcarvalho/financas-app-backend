@@ -1,5 +1,10 @@
 import { Anonymizer } from './sanitize';
 import { categoryLabel } from './category-labels';
+import {
+  positionOf,
+  signedGoalAmount,
+  sumByType,
+} from '../finance/finance-math';
 
 /**
  * Montagem da foto financeira que vai no prompt.
@@ -130,24 +135,33 @@ type MonthBucket = {
   receitas: number;
   despesas: number;
   investimentos: number;
+  resgates: number;
 };
+
+const emptyBucket = (): MonthBucket => ({
+  receitas: 0,
+  despesas: 0,
+  investimentos: 0,
+  resgates: 0,
+});
+
+/** Variação do caixa no mês: receitas − despesas − aportes + resgates. */
+const cashOf = (bucket: MonthBucket): number =>
+  bucket.receitas - bucket.despesas - bucket.investimentos + bucket.resgates;
 
 function bucketByMonth(rows: TransactionRow[]): Map<number, MonthBucket> {
   const buckets = new Map<number, MonthBucket>();
 
   for (const row of rows) {
     const index = monthIndex(row.date);
-    const bucket = buckets.get(index) ?? {
-      receitas: 0,
-      despesas: 0,
-      investimentos: 0,
-    };
+    const bucket = buckets.get(index) ?? emptyBucket();
 
     const amount = toNumber(row.amount);
 
     if (row.type === 'INCOME') bucket.receitas += amount;
     else if (row.type === 'EXPENSE') bucket.despesas += amount;
     else if (row.type === 'INVESTMENT') bucket.investimentos += amount;
+    else if (row.type === 'WITHDRAWAL') bucket.resgates += amount;
 
     buckets.set(index, bucket);
   }
@@ -162,27 +176,25 @@ export function buildMonthlyHistory(rows: TransactionRow[], now: Date) {
     mes: string;
     receitas: number;
     despesas: number;
-    investimentos: number;
-    saldo: number;
-    naoAlocado: number;
+    aportes: number;
+    resgates: number;
+    resultado: number;
+    variacaoDoCaixa: number;
   }[] = [];
 
   for (let index = current - (HISTORY_MONTHS - 1); index <= current; index++) {
-    const bucket = buckets.get(index) ?? {
-      receitas: 0,
-      despesas: 0,
-      investimentos: 0,
-    };
-
-    const saldo = bucket.receitas - bucket.despesas;
+    const bucket = buckets.get(index) ?? emptyBucket();
 
     history.push({
       mes: monthLabel(index),
       receitas: round2(bucket.receitas),
       despesas: round2(bucket.despesas),
-      investimentos: round2(bucket.investimentos),
-      saldo: round2(saldo),
-      naoAlocado: round2(saldo - bucket.investimentos),
+      aportes: round2(bucket.investimentos),
+      resgates: round2(bucket.resgates),
+      // O que o mês produziu...
+      resultado: round2(bucket.receitas - bucket.despesas),
+      // ...e quanto disso sobrou em caixa depois de guardar e resgatar.
+      variacaoDoCaixa: round2(cashOf(bucket)),
     });
   }
 
@@ -345,18 +357,31 @@ export function buildCategoryBreakdown(
     .sort((a, b) => b.mediaMensal - a.mediaMensal);
 }
 
-/** Últimos aportes, para o modelo enxergar o hábito e não só o acumulado. */
+/**
+ * Últimas movimentações de investimento, para o modelo enxergar o hábito e não
+ * só o acumulado.
+ *
+ * Aportes e resgates entram na mesma lista, distinguidos por `tipo`: quem
+ * resgatou duas vezes no trimestre tem um padrão que o total aportado esconde.
+ */
 export function buildRecentContributions(
   rows: TransactionRow[],
   now: Date,
   anonymizer: Anonymizer,
 ) {
   return rows
-    .filter((row) => row.type === 'INVESTMENT' && row.date <= now)
+    .filter(
+      (row) =>
+        (row.type === 'INVESTMENT' || row.type === 'WITHDRAWAL') &&
+        row.date <= now,
+    )
     .sort((a, b) => b.date.getTime() - a.date.getTime())
     .slice(0, MAX_RECENT_CONTRIBUTIONS)
     .map((row) => ({
-      descricao: anonymizer.text(row.title) ?? 'Aporte',
+      tipo: row.type === 'WITHDRAWAL' ? 'resgate' : 'aporte',
+      descricao:
+        anonymizer.text(row.title) ??
+        (row.type === 'WITHDRAWAL' ? 'Resgate' : 'Aporte'),
       categoria: categoryLabel(row.category),
       valor: round2(toNumber(row.amount)),
       data: isoDay(row.date),
@@ -364,20 +389,26 @@ export function buildRecentContributions(
     }));
 }
 
+/** Aporte ou resgate vinculado a uma meta. */
+export type GoalMovement = { date: Date; amount: string; type: string };
+
 /**
  * Ritmo observado de uma meta.
  *
  * Mesma regra da projeção da tela de metas (`src/lib/goalProjection.ts` no
- * frontend): mediana dos aportes por mês numa janela que nunca começa antes do
- * primeiro aporte, com mês sem aporte entrando como zero. Divergir daqui faria o
- * assistente contradizer o gráfico que o usuário tem na frente.
+ * frontend): mediana do que entrou por mês numa janela que nunca começa antes
+ * da primeira movimentação, com mês parado entrando como zero. Divergir daqui
+ * faria o assistente contradizer o gráfico que o usuário tem na frente.
+ *
+ * Resgate entra negativo: um mês em que se aportou 500 e sacou 500 não andou,
+ * e o ritmo precisa dizer isso.
  */
 export function observedGoalPace(
-  contributions: { date: Date; amount: string }[],
+  movements: GoalMovement[],
   now: Date,
 ): { ritmo: number; janelaMeses: number } {
   const current = monthIndex(now);
-  const months = contributions.map((item) => monthIndex(item.date));
+  const months = movements.map((item) => monthIndex(item.date));
 
   if (months.length === 0) return { ritmo: 0, janelaMeses: 0 };
 
@@ -388,10 +419,10 @@ export function observedGoalPace(
   const windowMonths = Math.max(current - windowStart + 1, 1);
   const perMonth = new Array<number>(windowMonths).fill(0);
 
-  for (const item of contributions) {
+  for (const item of movements) {
     const index = monthIndex(item.date);
     if (index >= windowStart && index <= current) {
-      perMonth[index - windowStart] += toNumber(item.amount);
+      perMonth[index - windowStart] += signedGoalAmount(item);
     }
   }
 
@@ -400,7 +431,7 @@ export function observedGoalPace(
 
 export function buildGoals(
   goalRows: GoalRow[],
-  contributionsByGoal: Map<string, { date: Date; amount: string }[]>,
+  contributionsByGoal: Map<string, GoalMovement[]>,
   now: Date,
   anonymizer: Anonymizer,
 ) {
@@ -411,11 +442,11 @@ export function buildGoals(
     const accumulated = toNumber(goal.currentValue);
     const remaining = Math.max(target - accumulated, 0);
 
+    const movements = contributionsByGoal.get(goal.id) ?? [];
+    const movementTotals = sumByType(movements);
+
     const plan = toNumber(goal.monthlyPlan) || null;
-    const { ritmo, janelaMeses } = observedGoalPace(
-      contributionsByGoal.get(goal.id) ?? [],
-      now,
-    );
+    const { ritmo, janelaMeses } = observedGoalPace(movements, now);
 
     const pace = plan ?? ritmo;
     const monthsToFinish = pace > 0 ? Math.ceil(remaining / pace) : null;
@@ -437,7 +468,11 @@ export function buildGoals(
       prioridade: goal.priority,
       horizonte: goal.type,
       valorAlvo: round2(target),
+      // Posição atual: já é aportes menos resgates.
       valorAcumulado: round2(accumulated),
+      // Histórico, que o resgate não apaga.
+      totalAportadoHistorico: round2(movementTotals.contributions),
+      totalResgatado: round2(movementTotals.withdrawals),
       valorRestante: round2(remaining),
       percentualConcluido:
         target > 0 ? round2((accumulated / target) * 100) : 0,
@@ -468,21 +503,27 @@ export function buildGoals(
  */
 export const CONTEXT_LIMITATIONS = [
   'O sistema não modela cartões de crédito, faturas nem contas bancárias. Compras parceladas existem apenas como parcelas individuais em despesas.parcelamentosEmAberto.',
-  'Investimentos são registrados como aportes (dinheiro guardado). Não há cotação, rentabilidade, tipo de ativo (renda fixa, ações, FIIs, cripto) nem saldo de corretora. Só projete rendimento se o usuário informar a taxa na pergunta, deixando a premissa explícita.',
+  'Investimentos são registrados como aportes e resgates (dinheiro guardado e retirado). Não há cotação, rentabilidade, tipo de ativo (renda fixa, ações, FIIs, cripto) nem saldo de corretora: o valor investido é sempre aportes menos resgates, sem rendimento. Só projete rendimento se o usuário informar a taxa na pergunta, deixando a premissa explícita.',
   'Nomes de instituições financeiras foram substituídos por apelidos genéricos ("Instituição A"). O apelido é estável dentro desta conversa, mas você não sabe qual é o banco real.',
-  'saldoAcumulado é receitas menos despesas em todo o histórico e JÁ INCLUI o dinheiro aportado. Para saber o que ainda não foi guardado, use naoAlocado (saldoAcumulado menos totalInvestido). Nunca some saldoAcumulado com totalInvestido.',
+  'O modelo separa FLUXO de POSIÇÃO. Aporte reduz o caixa e resgate aumenta, mas nenhum dos dois é despesa ou receita, e nenhum dos dois muda o patrimônio — só movem dinheiro entre caixa e investimentos. patrimonio.total já é caixaDisponivel + totalInvestido: nunca some os três.',
+  'patrimonio.outrosAtivos é sempre zero: o sistema ainda não cadastra bens (carro, imóvel). O patrimônio informado é apenas o financeiro.',
   'Uma recorrência é gravada como 12 ocorrências a partir da data de criação. Quando ocorrenciasFuturasRegistradas chega a zero, a despesa pode continuar existindo na vida real sem aparecer aqui.',
   'Orçamentos por categoria e categorias personalizadas ficam no navegador do usuário e não estão neste contexto.',
-  'Metas compartilhadas somam os aportes de todos os participantes em valorAcumulado.',
+  'Metas compartilhadas somam aportes e resgates de todos os participantes em valorAcumulado.',
 ];
 
 export type FinanceSnapshot = ReturnType<typeof buildSnapshot>;
 
 export function buildSnapshot(input: {
   rows: TransactionRow[];
-  lifetimeTotals: { receitas: number; despesas: number; investimentos: number };
+  lifetimeTotals: {
+    receitas: number;
+    despesas: number;
+    investimentos: number;
+    resgates: number;
+  };
   goalRows: GoalRow[];
-  contributionsByGoal: Map<string, { date: Date; amount: string }[]>;
+  contributionsByGoal: Map<string, GoalMovement[]>;
   now: Date;
   anonymizer: Anonymizer;
 }) {
@@ -501,23 +542,25 @@ export function buildSnapshot(input: {
 
   const windowMonths: MonthBucket[] = [];
   for (let index = window.start; index <= window.end; index++) {
-    windowMonths.push(
-      buckets.get(index) ?? { receitas: 0, despesas: 0, investimentos: 0 },
-    );
+    windowMonths.push(buckets.get(index) ?? emptyBucket());
   }
 
   const receitaMedia = mean(windowMonths.map((month) => month.receitas));
   const despesaMedia = mean(windowMonths.map((month) => month.despesas));
   const aporteMedio = mean(windowMonths.map((month) => month.investimentos));
 
-  const currentBucket = buckets.get(current) ?? {
-    receitas: 0,
-    despesas: 0,
-    investimentos: 0,
-  };
-  const currentSaldo = currentBucket.receitas - currentBucket.despesas;
+  const currentBucket = buckets.get(current) ?? emptyBucket();
 
-  const saldoAcumulado = lifetimeTotals.receitas - lifetimeTotals.despesas;
+  // A posição vem dos totais de vida inteira, não do mês: caixa e patrimônio
+  // são estoque, e somar só o mês corrente daria a variação, não o quanto se
+  // tem. Aporte sai do caixa sem sair do patrimônio; resgate faz o caminho de
+  // volta. É o mesmo cálculo que o endpoint /transactions/balance usa.
+  const position = positionOf({
+    income: lifetimeTotals.receitas,
+    expense: lifetimeTotals.despesas,
+    contributions: lifetimeTotals.investimentos,
+    withdrawals: lifetimeTotals.resgates,
+  });
 
   return {
     referencia: {
@@ -529,10 +572,18 @@ export function buildSnapshot(input: {
       mediasExcluemMesCorrente: window.excluiMesCorrente,
     },
 
+    patrimonio: {
+      caixaDisponivel: position.cash,
+      totalInvestido: position.invested,
+      outrosAtivos: position.otherAssets,
+      total: position.netWorth,
+      observacao:
+        'total = caixaDisponivel + totalInvestido + outrosAtivos. Aporte e resgate apenas transferem valor entre os dois primeiros e não mudam o total.',
+    },
+
     resumoGeral: {
-      saldoAcumulado: round2(saldoAcumulado),
-      totalInvestido: round2(lifetimeTotals.investimentos),
-      naoAlocado: round2(saldoAcumulado - lifetimeTotals.investimentos),
+      totalAportadoHistorico: round2(lifetimeTotals.investimentos),
+      totalResgatadoHistorico: round2(lifetimeTotals.resgates),
       receitaMensalMedia: round2(receitaMedia),
       despesaMensalMedia: round2(despesaMedia),
       aporteMensalMedio: round2(aporteMedio),
@@ -545,9 +596,10 @@ export function buildSnapshot(input: {
       mes: monthLabel(current),
       receitas: round2(currentBucket.receitas),
       despesas: round2(currentBucket.despesas),
-      investimentos: round2(currentBucket.investimentos),
-      saldo: round2(currentSaldo),
-      naoAlocado: round2(currentSaldo - currentBucket.investimentos),
+      aportes: round2(currentBucket.investimentos),
+      resgates: round2(currentBucket.resgates),
+      resultado: round2(currentBucket.receitas - currentBucket.despesas),
+      variacaoDoCaixa: round2(cashOf(currentBucket)),
       observacao:
         'Mês em andamento: os totais ainda vão mudar até o fim do período.',
     },
@@ -567,10 +619,14 @@ export function buildSnapshot(input: {
     },
 
     investimentos: {
-      totalAportado: round2(lifetimeTotals.investimentos),
+      // Posição atual: o que continua investido.
+      valorInvestidoAtual: position.invested,
+      // Histórico: o resgate move o saldo, não apaga o aporte que houve.
+      totalAportadoHistorico: round2(lifetimeTotals.investimentos),
+      totalResgatado: round2(lifetimeTotals.resgates),
       aporteMensalMedio: round2(aporteMedio),
       mediaMensalPorCategoria: buildCategoryBreakdown(rows, 'INVESTMENT', now),
-      aportesRecentes: buildRecentContributions(rows, now, anonymizer),
+      movimentacoesRecentes: buildRecentContributions(rows, now, anonymizer),
     },
 
     metas: buildGoals(goalRows, contributionsByGoal, now, anonymizer),
