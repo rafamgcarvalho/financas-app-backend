@@ -9,6 +9,7 @@ import {
   GoogleGenAI,
   type Content,
   type GenerateContentConfig,
+  type GenerateContentResponse,
 } from '@google/genai';
 
 /**
@@ -30,23 +31,42 @@ const DEFAULT_MODEL = 'gemini-2.5-flash';
 const DEFAULT_TEMPERATURE = 0.2;
 
 /**
- * Teto de saída.
+ * Quantas vezes a geração pode ser retomada de onde parou.
  *
- * O número precisa ser generoso porque **os tokens de raciocínio do modelo
- * contam aqui dentro**: "The max_output_tokens generation parameter sets the
- * maximum number of tokens a response can generate, including thought tokens"
- * (ai.google.dev/gemini-api/docs/thinking). Com 2048 no total, uma pergunta de
- * projeção gastava quase tudo pensando e a resposta era cortada no meio da
- * frase — foi exatamente o que aconteceu em produção.
+ * Existe porque nenhum teto resolve o caso sozinho: `maxOutputTokens` não é
+ * ilimitado nem quando omitido — vale o máximo do modelo —, e **os tokens de
+ * raciocínio contam dentro dele** ("max_output_tokens sets the maximum number of
+ * tokens a response can generate, including thought tokens",
+ * ai.google.dev/gemini-api/docs/thinking). Em vez de torcer para o teto ser
+ * suficiente, quando ele é atingido pedimos a continuação e emendamos o texto —
+ * ninguém deveria precisar digitar "continue".
  *
- * 8192 deixa folga para o raciocínio e ainda cabe uma resposta longa com tabela.
+ * Cada retomada reenvia o contexto inteiro. Três é o ponto onde a conta ainda
+ * compensa: uma resposta que não fecha em quatro gerações do modelo não é uma
+ * resposta, é um relatório que ninguém vai ler.
  */
-const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+const MAX_CONTINUATIONS = 3;
+
+/**
+ * O pedido de continuação.
+ *
+ * "Inclusive no meio de uma palavra" não é firula: a emenda é literal, sem
+ * separador, porque qualquer caractere inserido no ponto de corte apareceria no
+ * meio de uma frase ou quebraria a linha de uma tabela Markdown.
+ */
+const CONTINUE_PROMPT = `Sua resposta anterior foi interrompida pelo limite de tokens, no meio. Continue EXATAMENTE do ponto onde parou — inclusive no meio de uma palavra, linha ou tabela, se for o caso.
+
+Não cumprimente, não recomece, não resuma o que já disse e não repita nenhum trecho anterior. Escreva apenas a continuação, como se fosse o próximo caractere do mesmo texto.`;
 
 export type GeminiResult = {
   text: string;
-  /** O modelo bateu no teto de tokens e a resposta terminou no meio. */
+  /**
+   * A resposta continuou truncada mesmo depois das retomadas. Sinal para a
+   * interface avisar, e não para esconder o problema.
+   */
   truncated: boolean;
+  /** Quantas retomadas foram necessárias. Zero é o caso comum. */
+  continuations: number;
 };
 
 @Injectable()
@@ -89,11 +109,13 @@ export class GeminiService implements OnModuleInit {
     const config: GenerateContentConfig = {
       systemInstruction,
       temperature: this.envNumber('GEMINI_TEMPERATURE', DEFAULT_TEMPERATURE),
-      maxOutputTokens: this.envNumber(
-        'GEMINI_MAX_OUTPUT_TOKENS',
-        DEFAULT_MAX_OUTPUT_TOKENS,
-      ),
     };
+
+    // Sem `maxOutputTokens` de propósito: omitir deixa valer o máximo do próprio
+    // modelo, que é o maior valor possível sem ter que fixar no código um número
+    // que muda a cada geração de Flash. Quem quiser conter custo põe a variável.
+    const maxOutputTokens = this.envNumber('GEMINI_MAX_OUTPUT_TOKENS', 0);
+    if (maxOutputTokens > 0) config.maxOutputTokens = maxOutputTokens;
 
     // O orçamento de raciocínio fica como ajuste opcional, e não como padrão:
     // o parâmetro varia entre gerações de modelo, e fixá-lo no código quebraria
@@ -109,23 +131,22 @@ export class GeminiService implements OnModuleInit {
     return config;
   }
 
-  async generate(params: {
-    systemInstruction: string;
-    contents: Content[];
-  }): Promise<GeminiResult> {
+  /** Uma chamada ao modelo, com o erro do SDK já traduzido. */
+  private async callModel(
+    contents: Content[],
+    config: GenerateContentConfig,
+  ): Promise<GenerateContentResponse> {
     if (!this.client) {
       throw new ServiceUnavailableException(
         'O assistente financeiro não está configurado neste servidor.',
       );
     }
 
-    let response: Awaited<ReturnType<GoogleGenAI['models']['generateContent']>>;
-
     try {
-      response = await this.client.models.generateContent({
+      return await this.client.models.generateContent({
         model: this.model,
-        contents: params.contents,
-        config: this.buildConfig(params.systemInstruction),
+        contents,
+        config,
       });
     } catch (error) {
       // O detalhe fica no log do servidor; o cliente recebe só o que pode agir.
@@ -137,34 +158,78 @@ export class GeminiService implements OnModuleInit {
         'Não consegui falar com o assistente agora. Tente de novo em instantes.',
       );
     }
+  }
 
-    const finishReason = response.candidates?.[0]?.finishReason;
-    const text = response.text?.trim();
-    const truncated = finishReason === FinishReason.MAX_TOKENS;
+  /**
+   * Gera a resposta, retomando de onde parou enquanto o modelo bater no teto.
+   *
+   * Os pedaços são emendados sem `trim` no meio: o espaço que existia no ponto
+   * de corte é parte do texto, e apará-lo grudaria a última palavra de um pedaço
+   * na primeira do seguinte.
+   */
+  async generate(params: {
+    systemInstruction: string;
+    contents: Content[];
+  }): Promise<GeminiResult> {
+    const config = this.buildConfig(params.systemInstruction);
+    const contents = [...params.contents];
 
-    if (text) {
-      if (truncated) {
-        // Devolver texto cortado como se estivesse completo é o pior desfecho:
-        // quem lê "faltam 10 parcelas de" sem o número decide no escuro.
+    let answer = '';
+    let continuations = 0;
+
+    for (let attempt = 0; attempt <= MAX_CONTINUATIONS; attempt++) {
+      const response = await this.callModel(contents, config);
+      const chunk = response.text ?? '';
+      const finishReason = response.candidates?.[0]?.finishReason;
+      const hitCeiling = finishReason === FinishReason.MAX_TOKENS;
+
+      if (!chunk) {
+        // Na primeira chamada, nada a entregar: o motivo vira mensagem.
+        if (attempt === 0) this.failEmpty(response, finishReason, hitCeiling);
+
+        // Numa retomada, o que já veio vale mais do que um erro.
         this.logger.warn(
-          `Resposta truncada por maxOutputTokens (pensamento=${
-            response.usageMetadata?.thoughtsTokenCount ?? 'n/d'
-          }, saída=${response.usageMetadata?.candidatesTokenCount ?? 'n/d'}).`,
+          'Retomada voltou vazia; devolvendo a resposta parcial acumulada.',
         );
+        return { text: answer.trim(), truncated: true, continuations };
       }
 
-      return { text, truncated };
+      answer += chunk;
+
+      if (!hitCeiling)
+        return { text: answer.trim(), truncated: false, continuations };
+
+      if (attempt === MAX_CONTINUATIONS) break;
+
+      continuations++;
+      this.logger.log(
+        `Resposta atingiu o teto de tokens; pedindo continuação ${continuations}/${MAX_CONTINUATIONS}.`,
+      );
+
+      contents.push({ role: 'model', parts: [{ text: chunk }] });
+      contents.push({ role: 'user', parts: [{ text: CONTINUE_PROMPT }] });
     }
 
-    // Resposta vazia tem causa: filtro de segurança, corte por limite de tokens
-    // ou bloqueio do prompt. Cada uma pede uma orientação diferente ao usuário.
+    this.logger.warn(
+      `Resposta ainda truncada após ${MAX_CONTINUATIONS} retomadas.`,
+    );
+
+    return { text: answer.trim(), truncated: true, continuations };
+  }
+
+  /** Resposta vazia na primeira tentativa — cada causa pede uma orientação. */
+  private failEmpty(
+    response: GenerateContentResponse,
+    finishReason: FinishReason | undefined,
+    hitCeiling: boolean,
+  ): never {
     const blockReason = response.promptFeedback?.blockReason;
 
     this.logger.warn(
       `Resposta vazia do Gemini (finishReason=${finishReason ?? 'n/d'}, blockReason=${blockReason ?? 'n/d'}).`,
     );
 
-    if (truncated) {
+    if (hitCeiling) {
       throw new ServiceUnavailableException(
         'O modelo gastou todo o limite de tokens antes de escrever a resposta. Tente uma pergunta mais específica.',
       );

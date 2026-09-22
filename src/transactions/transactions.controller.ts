@@ -25,6 +25,10 @@ export class TransactionsController {
     return this.transactionsService.create(dto, userId);
   }
 
+  /**
+   * `from`/`to` ("AAAA-MM-DD") recortam por dia e têm precedência sobre
+   * `month`/`year`, que continuam valendo para quem consulta um mês fechado.
+   */
   @Get()
   findAll(
     @Req() req: any,
@@ -32,6 +36,8 @@ export class TransactionsController {
     @Query('year') year?: string,
     @Query('goalId') goalId?: string,
     @Query('type') type?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ) {
     return this.transactionsService.findAllById(
       req.user.sub,
@@ -39,6 +45,8 @@ export class TransactionsController {
       year ? parseInt(year) : undefined,
       goalId,
       type,
+      from,
+      to,
     );
   }
 

@@ -53,6 +53,41 @@ function normalizeTransactionType(type?: string): TransactionType | undefined {
   return TRANSACTION_TYPES.includes(upper) ? upper : undefined;
 }
 
+/**
+ * "2026-10-01" -> instante UTC daquele dia.
+ *
+ * `new Date("2026-10-01")` já resolve para meia-noite UTC, mas aceita também
+ * "2026-10-01T15:00:00Z" e qualquer coisa que o cliente inventar. Montar a data
+ * a partir dos três números garante que o recorte seja o dia inteiro, e nunca um
+ * pedaço dele — é o mesmo tratamento que o filtro por mês já dava.
+ *
+ * @param edge `start` ancora em 00:00:00.000; `end`, em 23:59:59.999.
+ */
+export function parseDayBoundary(
+  value: string | undefined,
+  edge: 'start' | 'end',
+): Date | undefined {
+  if (!value) return undefined;
+
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) return undefined;
+
+  const [, year, month, day] = match.map(Number);
+
+  const date =
+    edge === 'start'
+      ? new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0))
+      : new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
+
+  // Rejeita 2026-02-31 e afins: o Date rola para março, e um filtro que responde
+  // sobre um dia que não existe é pior do que um filtro ignorado.
+  if (date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return undefined;
+  }
+
+  return date;
+}
+
 @Injectable()
 export class TransactionsService {
   constructor(private readonly goalsGateway: GoalsGateway) {}
@@ -150,12 +185,19 @@ export class TransactionsService {
   }
 
   /* Encontrar transações */
+  /**
+   * @param from/@param to intervalo por dia ("AAAA-MM-DD"), inclusive nas duas
+   *   pontas. Tem precedência sobre mês/ano: quando a tela filtra por intervalo,
+   *   é uma requisição só, em vez de uma por mês atravessado.
+   */
   async findAllById(
     userId: string,
     month?: number,
     year?: number,
     goalId?: string,
     type?: string,
+    from?: string,
+    to?: string,
   ) {
     // Se tiver goalId, busca transações de TODOS os membros da meta
     if (goalId) {
@@ -171,7 +213,14 @@ export class TransactionsService {
       conditions.push(eq(transactions.type, normalizedType));
     }
 
-    if (month !== undefined && year !== undefined) {
+    const fromDate = parseDayBoundary(from, 'start');
+    const toDate = parseDayBoundary(to, 'end');
+
+    if (fromDate || toDate) {
+      // Uma ponta só também vale: "de 01/10 em diante" é um filtro legítimo.
+      if (fromDate) conditions.push(gte(transactions.date, fromDate));
+      if (toDate) conditions.push(lte(transactions.date, toDate));
+    } else if (month !== undefined && year !== undefined) {
       const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
       const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
 
@@ -550,8 +599,12 @@ export class TransactionsService {
 
     return Object.values(statsMap)
       .sort((a, b) => a.dateRef.getTime() - b.dateRef.getTime())
-      .map(({ label, income, expense }) => ({
+      .map(({ label, income, expense, dateRef }) => ({
         label,
+        // O rótulo é para ler ("set 26"); mês e ano são para agir. Sem eles, um
+        // clique no gráfico teria que adivinhar o período a partir do texto.
+        month: dateRef.getMonth() + 1,
+        year: dateRef.getFullYear(),
         income: Number(income.toFixed(2)),
         expense: Number(expense.toFixed(2)),
       }));

@@ -22,12 +22,15 @@ import {
 export const MAX_MESSAGE_LENGTH = 1000;
 export const MAX_HISTORY_ITEMS = 40;
 /**
- * Folgado o bastante para caber a resposta mais longa que o modelo consegue
- * gerar: 8192 tokens de saída dão algo perto de 30 mil caracteres. Um teto
- * apertado aqui devolveria 400 na mensagem seguinte e travaria a conversa por
- * causa da própria resposta do assistente.
+ * Teto por mensagem do histórico.
+ *
+ * Bate com o orçamento total de caracteres que o cliente envia (`toApiHistory`,
+ * no frontend): assim, qualquer mensagem que ele consiga mandar é aceita. Um
+ * teto menor devolveria 400 na pergunta seguinte por causa da própria resposta
+ * do assistente — que agora pode ser longa, já que a geração é retomada quando
+ * bate no limite de tokens do modelo.
  */
-const MAX_HISTORY_ITEM_LENGTH = 40000;
+const MAX_HISTORY_ITEM_LENGTH = 120000;
 
 /** Tetos do resumo de outros chats — o digest não pode virar o prompt inteiro. */
 export const MAX_OTHER_CONVERSATIONS = 6;

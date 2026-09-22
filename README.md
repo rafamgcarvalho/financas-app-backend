@@ -42,7 +42,7 @@ cp .env.example .env
 | `GEMINI_API_KEY` | Chave do [Google AI Studio](https://aistudio.google.com/apikey), usada pelo assistente. Sem ela a API sobe normalmente e só o chat fica indisponível. |
 | `GEMINI_MODEL` | Opcional. Padrão `gemini-2.5-flash`. |
 | `GEMINI_TEMPERATURE` | Opcional. Padrão `0.2`. |
-| `GEMINI_MAX_OUTPUT_TOKENS` | Opcional. Padrão `8192`. Os tokens de raciocínio contam aqui dentro — um teto baixo corta a resposta no meio. |
+| `GEMINI_MAX_OUTPUT_TOKENS` | Opcional. **Não enviado por padrão**: vale o máximo do modelo. Defina só para conter custo. |
 | `GEMINI_THINKING_BUDGET` | Opcional. Limita o raciocínio antes da resposta (`0` desliga, `-1` automático). Sem a variável, vale o padrão do modelo. |
 
 O `.env` está no `.gitignore` e a `GEMINI_API_KEY` nunca sai do servidor: o
@@ -96,7 +96,7 @@ seguinte.
 | `POST` | `/users` | Cadastro |
 | `POST` | `/auth/login` | Devolve `access_token` |
 | `GET` | `/users/:username` | Perfil público |
-| `GET` | `/transactions` | Filtros: `month`, `year`, `type`, `goalId` |
+| `GET` | `/transactions` | Filtros: `from`/`to` (AAAA-MM-DD, inclusive), `month`, `year`, `type`, `goalId` |
 | `POST` | `/transactions` | Cria (pode gerar várias linhas) |
 | `PATCH` | `/transactions/:id` | `?updateAll=true` para o grupo |
 | `DELETE` | `/transactions/:id` | `?deleteAll=true` para o grupo |
@@ -109,6 +109,21 @@ seguinte.
 | `POST` | `/chat` | Pergunta ao assistente. Corpo: `message` e `history` |
 
 As categorias são texto livre: quem define rótulo, ícone e cor é o frontend.
+
+## Filtro de período
+
+`GET /transactions` aceita `from` e `to` no formato `AAAA-MM-DD`, inclusive nas
+duas pontas: `from` ancora em 00:00:00.000 e `to` em 23:59:59.999 (UTC), senão o
+último dia digitado ficaria de fora.
+
+O intervalo tem **precedência** sobre `month`/`year`, que continuam valendo para
+quem consulta um mês fechado — é o que o dashboard usa. Uma data fora do
+calendário (`2026-02-31`) é ignorada em vez de rolar para março: um filtro que
+responde sobre um dia inexistente é pior do que um filtro ignorado.
+
+Antes, um período de vários meses virava uma requisição por mês no navegador,
+com corte em 24 meses e filtragem do resto no cliente. Com o intervalo é uma
+requisição só, e a API devolve exatamente as linhas pedidas.
 
 ## Assistente financeiro (`/chat`)
 
@@ -151,6 +166,24 @@ envelope agora carrega um `<estado_da_conversa>` com o número da mensagem e um
 `primeira_mensagem`, e o system prompt tem uma seção de CONTINUIDADE que proíbe
 cumprimentar de novo. É determinístico: não depende de o modelo inferir o tom
 pelo histórico.
+
+### Tamanho da resposta
+
+Nenhum teto é enviado: sem `maxOutputTokens`, vale o máximo do próprio modelo —
+e o número certo muda a cada geração de Flash, então fixá-lo no código só criaria
+um limite artificial para manter.
+
+Ainda assim o teto do modelo existe, e os tokens de raciocínio contam dentro
+dele. Por isso, quando a geração termina com `finishReason: MAX_TOKENS`, o
+serviço reenvia o trecho parcial como turno do assistente, pede a continuação e
+**emenda o texto sem inserir caractere nenhum no ponto de corte** — a emenda é
+literal porque o corte pode cair no meio de uma palavra ou de uma linha de
+tabela. São até 3 retomadas; o custo é reenviar o contexto a cada uma, o que só
+acontece em resposta realmente longa.
+
+Se nem as retomadas fecharem, a resposta volta com `truncated: true` e a
+interface avisa. O que nunca acontece é entregar meia resposta como se fosse
+inteira.
 
 ### Memória entre chats
 
