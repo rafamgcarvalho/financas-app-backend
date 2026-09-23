@@ -5,6 +5,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
+  ApiError,
   FinishReason,
   GoogleGenAI,
   type Content,
@@ -57,6 +58,30 @@ const MAX_CONTINUATIONS = 3;
 const CONTINUE_PROMPT = `Sua resposta anterior foi interrompida pelo limite de tokens, no meio. Continue EXATAMENTE do ponto onde parou — inclusive no meio de uma palavra, linha ou tabela, se for o caso.
 
 Não cumprimente, não recomece, não resuma o que já disse e não repita nenhum trecho anterior. Escreva apenas a continuação, como se fosse o próximo caractere do mesmo texto.`;
+
+/**
+ * Status HTTP que valem uma nova tentativa.
+ *
+ * São as falhas do lado deles, não da pergunta: sobrecarga momentânea (503),
+ * limite de taxa (429), erro interno (500/502/504) e timeout (408). Repetir a
+ * mesma requisição depois de um instante costuma passar.
+ *
+ * 400, 401, 403 e 404 ficam de fora de propósito — nenhuma delas melhora com
+ * insistência, e repeti-las só faria o usuário esperar mais pelo mesmo erro.
+ */
+const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+/**
+ * Quantas vezes uma chamada pode ser repetida antes de desistir.
+ *
+ * Duas. Com o backoff abaixo, o pior caso adiciona cerca de 1,2s antes de
+ * devolver o erro — tempo que o usuário já gastaria clicando em "tentar
+ * novamente", que era exatamente o que ele vinha tendo que fazer.
+ */
+const MAX_RETRIES = 2;
+
+/** Espera base do backoff exponencial: 300ms, depois 600ms. */
+const RETRY_BASE_DELAY_MS = 300;
 
 export type GeminiResult = {
   text: string;
@@ -131,7 +156,41 @@ export class GeminiService implements OnModuleInit {
     return config;
   }
 
-  /** Uma chamada ao modelo, com o erro do SDK já traduzido. */
+  /** Pausa entre tentativas. Método para os testes poderem adiantar o relógio. */
+  protected sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * A falha é do lado deles e passa sozinha?
+   *
+   * Além do status HTTP, cobre a queda de conexão: quando o fetch morre antes de
+   * ter resposta o SDK propaga um TypeError ("fetch failed") sem status nenhum,
+   * e esse é justamente o caso em que repetir resolve.
+   */
+  private isRetryable(error: unknown): boolean {
+    if (error instanceof ApiError) return RETRYABLE_STATUSES.has(error.status);
+
+    if (error instanceof Error) {
+      return /fetch failed|network|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(
+        error.message,
+      );
+    }
+
+    return false;
+  }
+
+  /**
+   * Uma chamada ao modelo, repetida quando a falha é transitória.
+   *
+   * O Gemini devolve 503 de vez em quando sob carga, e sem isto uma única
+   * oscilação virava erro na cara do usuário — que clicava de novo e funcionava.
+   * Se ele ia repetir a chamada de qualquer forma, é o servidor que deve fazer
+   * isso, mais rápido e sem perder a pergunta.
+   *
+   * O backoff é exponencial com jitter: várias abas falhando ao mesmo tempo não
+   * devem voltar todas juntas no mesmo instante e derrubar de novo.
+   */
   private async callModel(
     contents: Content[],
     config: GenerateContentConfig,
@@ -142,21 +201,35 @@ export class GeminiService implements OnModuleInit {
       );
     }
 
-    try {
-      return await this.client.models.generateContent({
-        model: this.model,
-        contents,
-        config,
-      });
-    } catch (error) {
-      // O detalhe fica no log do servidor; o cliente recebe só o que pode agir.
-      this.logger.error(
-        `Falha ao chamar o Gemini: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.client.models.generateContent({
+          model: this.model,
+          contents,
+          config,
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
 
-      throw new ServiceUnavailableException(
-        'Não consegui falar com o assistente agora. Tente de novo em instantes.',
-      );
+        if (attempt < MAX_RETRIES && this.isRetryable(error)) {
+          const backoff =
+            RETRY_BASE_DELAY_MS * 2 ** attempt * (1 + Math.random());
+
+          this.logger.warn(
+            `Gemini falhou (${reason}); tentando de novo em ${Math.round(backoff)}ms (${attempt + 1}/${MAX_RETRIES}).`,
+          );
+
+          await this.sleep(backoff);
+          continue;
+        }
+
+        // O detalhe fica no log do servidor; o cliente recebe só o que pode agir.
+        this.logger.error(`Falha ao chamar o Gemini: ${reason}`);
+
+        throw new ServiceUnavailableException(
+          'Não consegui falar com o assistente agora. Tente de novo em instantes.',
+        );
+      }
     }
   }
 

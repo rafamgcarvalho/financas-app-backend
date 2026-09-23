@@ -1,5 +1,9 @@
 import { Logger, ServiceUnavailableException } from '@nestjs/common';
-import { FinishReason, type GenerateContentResponse } from '@google/genai';
+import {
+  ApiError,
+  FinishReason,
+  type GenerateContentResponse,
+} from '@google/genai';
 import { GeminiService } from './gemini.service';
 
 /**
@@ -24,13 +28,29 @@ function reply(text: string, finishReason = FinishReason.STOP) {
   } as unknown as GenerateContentResponse;
 }
 
+/**
+ * O backoff do retry é real em produção; aqui vira nada.
+ *
+ * Sem isto cada teste de repetição esperaria de verdade, e a suíte inteira
+ * passaria a depender de relógio. O `waited` guarda as pausas pedidas, que é o
+ * que os testes de backoff precisam observar.
+ */
+class TestableGemini extends GeminiService {
+  readonly waited: number[] = [];
+
+  protected sleep(ms: number): Promise<void> {
+    this.waited.push(ms);
+    return Promise.resolve();
+  }
+}
+
 function setup(replies: GenerateContentResponse[]) {
   const generateContent = jest.fn<Promise<GenerateContentResponse>, []>();
   replies.forEach((response) =>
     generateContent.mockResolvedValueOnce(response),
   );
 
-  const service = new GeminiService();
+  const service = new TestableGemini();
   const client: FakeClient = { models: { generateContent } };
   (service as unknown as { client: FakeClient }).client = client;
 
@@ -168,5 +188,136 @@ describe('GeminiService.generate', () => {
     await expect(ask(service)).rejects.toThrow(
       'O assistente financeiro não está configurado neste servidor.',
     );
+  });
+});
+
+/**
+ * Repetição de falha transitória.
+ *
+ * O sintoma que originou isto: mandar a mensagem dava erro e clicar de novo
+ * funcionava. Era o Gemini oscilando — 503 sob carga, conexão caindo — e o
+ * servidor entregando a primeira falha direto na tela. Se a chamada ia ser
+ * repetida de qualquer jeito, que seja aqui.
+ */
+describe('GeminiService: falhas transitórias', () => {
+  beforeAll(() => {
+    Logger.overrideLogger(false);
+  });
+  afterAll(() => {
+    Logger.overrideLogger(true);
+  });
+
+  const apiError = (status: number) =>
+    new ApiError({ message: `falha ${status}`, status });
+
+  /** Falha nas primeiras `failures` chamadas, depois responde. */
+  function setupFailing(failures: number, error: unknown) {
+    const generateContent = jest.fn<Promise<GenerateContentResponse>, []>();
+
+    for (let i = 0; i < failures; i++) {
+      generateContent.mockRejectedValueOnce(error);
+    }
+    generateContent.mockResolvedValue(reply('Sobram R$ 800.'));
+
+    const service = new TestableGemini();
+    (service as unknown as { client: FakeClient }).client = {
+      models: { generateContent },
+    };
+
+    return { service, generateContent };
+  }
+
+  it.each([408, 429, 500, 502, 503, 504])(
+    'repete depois de um %i e entrega a resposta',
+    async (status) => {
+      const { service, generateContent } = setupFailing(1, apiError(status));
+
+      await expect(ask(service)).resolves.toMatchObject({
+        text: 'Sobram R$ 800.',
+      });
+      expect(generateContent).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('repete quando a conexão cai antes de haver status', async () => {
+    const { service, generateContent } = setupFailing(
+      1,
+      new TypeError('fetch failed'),
+    );
+
+    await expect(ask(service)).resolves.toMatchObject({
+      text: 'Sobram R$ 800.',
+    });
+    expect(generateContent).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([400, 401, 403, 404])(
+    'não insiste num %i, que não melhora com repetição',
+    async (status) => {
+      const { service, generateContent } = setupFailing(1, apiError(status));
+
+      await expect(ask(service)).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      expect(generateContent).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('desiste depois de duas repetições em vez de insistir para sempre', async () => {
+    const { service, generateContent } = setupFailing(99, apiError(503));
+
+    await expect(ask(service)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+    // A original mais duas repetições.
+    expect(generateContent).toHaveBeenCalledTimes(3);
+  });
+
+  it('espera mais a cada tentativa, e nunca o mesmo tanto', async () => {
+    const { service } = setupFailing(99, apiError(503));
+    await expect(ask(service)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+
+    const [first, second] = service.waited;
+
+    // Backoff exponencial com jitter: 300–600ms, depois 600–1200ms.
+    expect(first).toBeGreaterThanOrEqual(300);
+    expect(first).toBeLessThan(600);
+    expect(second).toBeGreaterThanOrEqual(600);
+    expect(second).toBeLessThan(1200);
+  });
+
+  it('não vaza a mensagem crua do SDK, que carrega a URL com a chave', async () => {
+    const { service } = setupFailing(
+      99,
+      new ApiError({
+        message: 'GET https://...?key=AIzaSySEGREDO falhou',
+        status: 503,
+      }),
+    );
+
+    await expect(ask(service)).rejects.toThrow(
+      'Não consegui falar com o assistente agora. Tente de novo em instantes.',
+    );
+  });
+
+  it('a repetição vale também para as continuações', async () => {
+    const generateContent = jest.fn<Promise<GenerateContentResponse>, []>();
+    generateContent
+      .mockResolvedValueOnce(reply('primeira parte ', FinishReason.MAX_TOKENS))
+      .mockRejectedValueOnce(apiError(503))
+      .mockResolvedValueOnce(reply('e o resto.'));
+
+    const service = new TestableGemini();
+    (service as unknown as { client: FakeClient }).client = {
+      models: { generateContent },
+    };
+
+    await expect(ask(service)).resolves.toMatchObject({
+      text: 'primeira parte e o resto.',
+      truncated: false,
+    });
+    expect(generateContent).toHaveBeenCalledTimes(3);
   });
 });
